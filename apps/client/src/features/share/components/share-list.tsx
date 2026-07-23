@@ -53,7 +53,7 @@ export default function ShareList() {
                     component={Link}
                     target="_blank"
                     to={buildSharedPageUrl({
-                      shareId: share.key,
+                      shareId: share.slug ?? share.key,
                       pageTitle: share.page.title,
                       pageSlugId: share.page.slugId,
                     })}

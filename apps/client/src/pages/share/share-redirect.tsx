@@ -14,7 +14,7 @@ export default function ShareRedirect() {
     if (share) {
       navigate(
         buildSharedPageUrl({
-          shareId: share.key,
+          shareId: share.slug ?? share.key,
           pageSlugId: share?.sharedPage.slugId,
           pageTitle: share?.sharedPage.title,
         }),

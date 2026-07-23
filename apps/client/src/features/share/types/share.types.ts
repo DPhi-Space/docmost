@@ -3,6 +3,7 @@ import { IPage } from "@/features/page/types/page.types.ts";
 export interface IShare {
   id: string;
   key: string;
+  slug?: string | null;
   pageId: string;
   includeSubPages: boolean;
   searchIndexing: boolean;
@@ -60,6 +61,7 @@ export interface ICreateShare {
   pageId?: string;
   includeSubPages?: boolean;
   searchIndexing?: boolean;
+  slug?: string | null;
 }
 
 export type IUpdateShare = ICreateShare & { shareId: string; pageId?: string };

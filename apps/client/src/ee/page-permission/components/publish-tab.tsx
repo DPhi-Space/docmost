@@ -23,6 +23,30 @@ import {
   useUpdateShareMutation,
 } from "@/features/share/queries/share-query";
 import useTrial from "@/ee/hooks/use-trial";
+import type { TFunction } from "i18next";
+
+// Keep in sync with the backend share-slug validation
+// (apps/server/src/core/share/dto/share.dto.ts + share-slug.validator.ts).
+const SLUG_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+const NANOID_KEY_SHAPE = /^[0-9a-z]{10}$/;
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateSlug(value: string, t: TFunction): string | null {
+  const v = value.trim();
+  if (v.length === 0) return null; // empty clears the slug
+  if (v.length < 2) return t("Slug must be at least 2 characters");
+  if (v.length > 100) return t("Slug must be at most 100 characters");
+  if (!SLUG_REGEX.test(v)) {
+    return t(
+      "Slug must start with a letter or number and may contain hyphens and underscores",
+    );
+  }
+  if (UUID_REGEX.test(v) || NANOID_KEY_SHAPE.test(v.toLowerCase())) {
+    return t("This slug format is not allowed");
+  }
+  return null;
+}
 
 type PublishTabProps = {
   pageId: string;
@@ -32,7 +56,13 @@ type PublishTabProps = {
   spaceSharingDisabled?: boolean;
 };
 
-export function PublishTab({ pageId, readOnly, isRestricted, workspaceSharingDisabled, spaceSharingDisabled }: PublishTabProps) {
+export function PublishTab({
+  pageId,
+  readOnly,
+  isRestricted,
+  workspaceSharingDisabled,
+  spaceSharingDisabled,
+}: PublishTabProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { pageSlug, spaceSlug } = useParams();
@@ -46,13 +76,43 @@ export function PublishTab({ pageId, readOnly, isRestricted, workspaceSharingDis
   const pageIsShared = share && share.level === 0;
   const isDescendantShared = share && share.level > 0;
 
-  const publicLink = `${getAppUrl()}/share/${share?.key}/p/${pageSlug}`;
+  const publicIdentifier = share?.slug ?? share?.key;
+  const publicLink = `${getAppUrl()}/share/${publicIdentifier}/p/${pageSlug}`;
 
   const [isPagePublic, setIsPagePublic] = useState<boolean>(false);
+  const [slugInput, setSlugInput] = useState<string>("");
+  const [slugError, setSlugError] = useState<string | null>(null);
 
   useEffect(() => {
     setIsPagePublic(!!share);
   }, [share, pageId]);
+
+  useEffect(() => {
+    setSlugInput(share?.slug ?? "");
+    setSlugError(null);
+  }, [share?.slug, share?.id]);
+
+  const handleSlugSave = async () => {
+    if (!share?.id) return;
+    const value = slugInput.trim();
+    const validationError = validateSlug(value, t);
+    if (validationError) {
+      setSlugError(validationError);
+      return;
+    }
+    try {
+      await updateShareMutation.mutateAsync({
+        shareId: share.id,
+        slug: value.length > 0 ? value : null,
+      });
+      setSlugError(null);
+    } catch (err) {
+      setSlugError(
+        err?.["response"]?.data?.message ||
+          t("This share slug is already in use"),
+      );
+    }
+  };
 
   const handleChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = event.currentTarget.checked;
@@ -247,6 +307,42 @@ export function PublishTab({ pageId, readOnly, isRestricted, workspaceSharingDis
               disabled={readOnly}
             />
           </Group>
+          <Stack gap={4}>
+            <div>
+              <Text size="sm">{t("Custom link")}</Text>
+              <Text size="xs" c="dimmed">
+                {t("Use a memorable alias instead of the random link")}
+              </Text>
+            </div>
+            <Group gap={4} wrap="nowrap" align="flex-start">
+              <TextInput
+                style={{ flex: 1 }}
+                placeholder={share.key}
+                value={slugInput}
+                onChange={(event) => {
+                  setSlugInput(event.currentTarget.value);
+                  setSlugError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    handleSlugSave();
+                  }
+                }}
+                error={slugError}
+                disabled={readOnly}
+              />
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handleSlugSave}
+                loading={updateShareMutation.isPending}
+                disabled={readOnly || slugInput.trim() === (share.slug ?? "")}
+              >
+                {t("Save")}
+              </Button>
+            </Group>
+          </Stack>
         </>
       )}
     </Stack>

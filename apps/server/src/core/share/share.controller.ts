@@ -214,7 +214,12 @@ export class ShareController {
     // User must be able to edit the page to update its share
     await this.pageAccessService.validateCanEdit(page, user);
 
-    return this.shareService.updateShare(share.id, updateShareDto);
+    return this.shareService.updateShare(
+      share.id,
+      updateShareDto,
+      share.workspaceId,
+      share.slug,
+    );
   }
 
   @HttpCode(HttpStatus.OK)

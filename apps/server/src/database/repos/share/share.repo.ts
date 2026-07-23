@@ -25,6 +25,7 @@ export class ShareRepo {
   private baseFields: Array<keyof Share> = [
     'id',
     'key',
+    'slug',
     'pageId',
     'includeSubPages',
     'searchIndexing',
@@ -64,7 +65,11 @@ export class ShareRepo {
     if (isValidUUID(shareId)) {
       query = query.where('id', '=', shareId);
     } else {
-      query = query.where(sql`LOWER(key)`, '=', shareId.toLowerCase());
+      // A public identifier can be either the random `key` or a custom `slug`.
+      const lower = shareId.toLowerCase();
+      query = query.where((eb) =>
+        eb(sql`LOWER(key)`, '=', lower).or(sql`LOWER(slug)`, '=', lower),
+      );
     }
 
     return query.executeTakeFirst();
@@ -100,16 +105,33 @@ export class ShareRepo {
     shareId: string,
     trx?: KyselyTransaction,
   ) {
+    const lower = shareId.toLowerCase();
     return dbOrTx(this.db, trx)
       .updateTable('shares')
       .set({ ...updatableShare, updatedAt: new Date() })
-      .where(
-        isValidUUID(shareId) ? 'id' : sql`LOWER(key)`,
-        '=',
-        shareId.toLowerCase(),
+      .where((eb) =>
+        isValidUUID(shareId)
+          ? eb('id', '=', shareId)
+          : eb(sql`LOWER(key)`, '=', lower).or(sql`LOWER(slug)`, '=', lower),
       )
       .returning(this.baseFields)
       .executeTakeFirst();
+  }
+
+  async slugExists(
+    slug: string,
+    workspaceId: string,
+    trx?: KyselyTransaction,
+  ): Promise<boolean> {
+    const db = dbOrTx(this.db, trx);
+    let { count } = await db
+      .selectFrom('shares')
+      .select((eb) => eb.fn.count('id').as('count'))
+      .where(sql`LOWER(slug)`, '=', sql`LOWER(${slug})`)
+      .where('workspaceId', '=', workspaceId)
+      .executeTakeFirst();
+    count = count as number;
+    return count != 0;
   }
 
   async insertShare(
@@ -130,7 +152,10 @@ export class ShareRepo {
     if (isValidUUID(shareId)) {
       query = query.where('id', '=', shareId);
     } else {
-      query = query.where(sql`LOWER(key)`, '=', shareId.toLowerCase());
+      const lower = shareId.toLowerCase();
+      query = query.where((eb) =>
+        eb(sql`LOWER(key)`, '=', lower).or(sql`LOWER(slug)`, '=', lower),
+      );
     }
 
     await query.execute();
@@ -141,10 +166,7 @@ export class ShareRepo {
     trx?: KyselyTransaction,
   ): Promise<void> {
     const db = dbOrTx(this.db, trx);
-    await db
-      .deleteFrom('shares')
-      .where('spaceId', '=', spaceId)
-      .execute();
+    await db.deleteFrom('shares').where('spaceId', '=', spaceId).execute();
   }
 
   async deleteByWorkspaceId(
@@ -165,7 +187,11 @@ export class ShareRepo {
       .select((eb) => this.withPage(eb))
       .select((eb) => this.withSpace(eb, userId))
       .select((eb) => this.withCreator(eb))
-      .where('spaceId', 'in', this.spaceMemberRepo.getUserSpaceIdsQuery(userId));
+      .where(
+        'spaceId',
+        'in',
+        this.spaceMemberRepo.getUserSpaceIdsQuery(userId),
+      );
 
     return executeWithCursorPagination(query, {
       perPage: pagination.limit,

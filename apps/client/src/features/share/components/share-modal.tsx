@@ -56,7 +56,7 @@ export default function ShareModal({ readOnly }: ShareModalProps) {
   // if level is greater than zero, then it is a descendant page from a shared page
   const isDescendantShared = share && share.level > 0;
 
-  const publicLink = `${getAppUrl()}/share/${share?.key}/p/${pageSlug}`;
+  const publicLink = `${getAppUrl()}/share/${share?.slug ?? share?.key}/p/${pageSlug}`;
 
   const [isPagePublic, setIsPagePublic] = useState<boolean>(false);
   useEffect(() => {

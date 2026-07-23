@@ -357,6 +357,7 @@ export interface Shares {
   key: string;
   pageId: string | null;
   searchIndexing: Generated<boolean | null>;
+  slug: string | null;
   spaceId: string;
   updatedAt: Generated<Timestamp>;
   workspaceId: string;

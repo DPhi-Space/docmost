@@ -28,14 +28,19 @@ export default function SharedPage() {
 
   useEffect(() => {
     if (shareId && data) {
-      if (data.share.key !== shareId) {
+      // A share can be reached by its random key or its custom slug. Treat both
+      // as canonical so a valid slug URL is not bounced back to the key URL.
+      const canonicalId = data.share.slug ?? data.share.key;
+      const isCanonical =
+        shareId === data.share.key || shareId === data.share.slug;
 
+      if (!isCanonical) {
         // Check if the current page is part of the active sharing tree (sidebar) - If we are part of it, we will not redirect, keeping the sidebar visible.
         const isPartOfTree =
           sharedTreeData && isPageInTree(sharedTreeData, data.page.slugId);
 
         if (!isPartOfTree) {
-          navigate(`/share/${data.share.key}/p/${pageSlug}`, { replace: true });
+          navigate(`/share/${canonicalId}/p/${pageSlug}`, { replace: true });
         }
       }
     }
