@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { EnvironmentService } from './environment.service';
+import { Feature } from '../../common/features';
+
+// This fork ships a native (non-EE) API-keys backend, so the API-keys feature
+// is unlocked in the OSS build regardless of any enterprise license.
+const FORK_ENABLED_FEATURES: string[] = [Feature.API_KEYS];
 
 @Injectable()
 export class LicenseCheckService {
@@ -63,17 +68,23 @@ export class LicenseCheckService {
   }
 
   resolveFeatures(licenseKey: string, plan: string): string[] {
+    let features: string[];
+
     if (this.environmentService.isCloud()) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { getFeaturesForCloudPlan } = require('../../ee/licence/feature-registry');
-        return [...getFeaturesForCloudPlan(plan)];
+        features = [...getFeaturesForCloudPlan(plan)];
       } catch {
-        return [];
+        features = [];
       }
+    } else {
+      features = this.getFeatures(licenseKey);
     }
 
-    return this.getFeatures(licenseKey);
+    // Advertise the fork-enabled features (e.g. API keys) on top of whatever the
+    // license/plan grants, de-duplicated. This un-disables the shipped UI.
+    return [...new Set([...features, ...FORK_ENABLED_FEATURES])];
   }
 
   resolveTier(licenseKey: string, plan: string): string {
