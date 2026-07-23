@@ -134,6 +134,7 @@ import { CleanStyles } from "@/features/editor/extensions/clean-styles.ts";
 
 const lowlight = createLowlight(common);
 lowlight.register("mermaid", plaintext);
+lowlight.register("d2", plaintext);
 lowlight.register("powershell", powershell);
 lowlight.register("abap", abap);
 lowlight.register("erlang", erlang);

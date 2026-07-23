@@ -39,6 +39,14 @@ export default defineConfig(({ mode }) => {
       APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
     plugins: [react()],
+    optimizeDeps: {
+      // @terrastruct/d2's browser build inlines its multi-MB WASM binary
+      // (base64) and spins up its Web Worker from a runtime Blob, so it is
+      // fully self-contained and needs no external .wasm fetch. Excluding it
+      // from dep pre-bundling keeps this heavy, lazily-imported module out of
+      // the pre-bundle step (it is loaded on demand via React.lazy).
+      exclude: ["@terrastruct/d2"],
+    },
     build: {
       rolldownOptions: {
         output: {

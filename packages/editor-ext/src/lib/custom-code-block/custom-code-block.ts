@@ -16,6 +16,15 @@ export interface CodeBlockLowlightOptions extends CodeBlockOptions {
 
 const TAB_CHAR = '\u00A0\u00A0';
 
+// Code-block languages that hide their <pre> source and render a preview
+// instead (mermaid, d2). Cursor navigation must land inside the source of
+// these blocks rather than skipping past the hidden <pre>.
+const HIDDEN_PREVIEW_LANGUAGES = ['mermaid', 'd2'];
+
+const hasHiddenPreview = (node: any, type: any) =>
+  node?.type === type &&
+  HIDDEN_PREVIEW_LANGUAGES.includes(node.attrs.language);
+
 /**
  * This extension allows you to highlight code blocks with lowlight.
  * @see https://tiptap.dev/api/nodes/code-block-lowlight
@@ -41,8 +50,9 @@ export const CustomCodeBlock = CodeBlock.extend<CodeBlockLowlightOptions>({
   },
 
   addKeyboardShortcuts() {
-    const isMermaid = (node: any) =>
-      node?.type === this.type && node.attrs.language === 'mermaid';
+    const codeBlockType = this.type;
+    const isHiddenPreview = (node: any) =>
+      hasHiddenPreview(node, codeBlockType);
 
     return {
       ...this.parent?.(),
@@ -65,7 +75,7 @@ export const CustomCodeBlock = CodeBlock.extend<CodeBlockLowlightOptions>({
         const $after = doc.resolve(after);
         const nodeAfter = $after.nodeAfter;
 
-        if (isMermaid(nodeAfter)) {
+        if (isHiddenPreview(nodeAfter)) {
           return editor.commands.command(({ tr }) => {
             tr.setSelection(TextSelection.create(tr.doc, after + 1));
             return true;
@@ -102,7 +112,7 @@ export const CustomCodeBlock = CodeBlock.extend<CodeBlockLowlightOptions>({
         const $before = doc.resolve(before);
         const nodeBefore = $before.nodeBefore;
 
-        if (isMermaid(nodeBefore)) {
+        if (isHiddenPreview(nodeBefore)) {
           return editor.commands.command(({ tr }) => {
             tr.setSelection(TextSelection.create(tr.doc, before - 1));
             return true;
@@ -200,14 +210,14 @@ export const CustomCodeBlock = CodeBlock.extend<CodeBlockLowlightOptions>({
             const dir = event.key === 'ArrowUp' ? 'up' : 'down';
             if (!view.endOfTextblock(dir)) return false;
 
-            const isMermaid = (node: any) =>
-              node?.type === codeBlockType && node.attrs.language === 'mermaid';
+            const isHiddenPreview = (node: any) =>
+              hasHiddenPreview(node, codeBlockType);
 
             if (event.key === 'ArrowUp') {
               if ($from.parentOffset !== 0) return false;
               const beforePos = $from.before();
               const prev = state.doc.resolve(beforePos).nodeBefore;
-              if (!isMermaid(prev)) return false;
+              if (!isHiddenPreview(prev)) return false;
               const endPos = beforePos - 1;
               view.dispatch(
                 state.tr.setSelection(
@@ -219,7 +229,7 @@ export const CustomCodeBlock = CodeBlock.extend<CodeBlockLowlightOptions>({
             if ($from.parentOffset !== $from.parent.nodeSize - 2) return false;
             const afterPos = $from.after();
             const next = state.doc.resolve(afterPos).nodeAfter;
-            if (!isMermaid(next)) return false;
+            if (!isHiddenPreview(next)) return false;
             const startPos = afterPos + 1;
             view.dispatch(
               state.tr.setSelection(
