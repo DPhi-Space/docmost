@@ -23,6 +23,14 @@
     justify-content: center;
 }
 
+/* D2's renderer emits an SVG with fixed intrinsic width/height and no
+   responsive style (unlike Mermaid, which ships its own max-width). Clamp it
+   to the content width so large diagrams don't overflow the page. */
+.d2 svg {
+    max-width: 100%;
+    height: auto;
+}
+
 .menuGroup {
     @media print {
         display: none;
