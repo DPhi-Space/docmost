@@ -117,6 +117,15 @@ export default function D2View({ props }: D2ViewProps) {
             d2.render(result.diagram, {
               ...result.renderOptions,
               themeID,
+              // By default D2 emits an outer <svg> with a viewBox but no
+              // width/height ("fit to screen"), so the browser stretches even a
+              // tiny diagram to the full container width. scale:1 turns that off
+              // and renders at natural size (so `.d2 svg { max-width:100% }` only
+              // shrinks diagrams that genuinely overflow — matching Mermaid).
+              scale: 1,
+              // D2's default padding is 100px on every side, which dwarfs small
+              // diagrams. Trim it to a modest margin.
+              pad: 20,
               // Omit the <?xml ...?> tag so the SVG embeds cleanly inline.
               noXMLTag: true,
             }),
