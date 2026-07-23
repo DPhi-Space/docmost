@@ -53,6 +53,13 @@ export class LicenseCheckService {
   }
 
   hasFeature(licenseKey: string, feature: string, plan?: string): boolean {
+    // Fork-enabled features are unlocked regardless of license/plan. This must
+    // mirror resolveFeatures() so the backend write-gates (e.g. workspace
+    // SECURITY_SETTINGS) accept the toggles the frontend already surfaces.
+    if (FORK_ENABLED_FEATURES.includes(feature)) {
+      return true;
+    }
+
     if (this.environmentService.isCloud()) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
