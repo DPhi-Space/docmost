@@ -3,9 +3,30 @@ import { ModuleRef } from '@nestjs/core';
 import { EnvironmentService } from './environment.service';
 import { Feature } from '../../common/features';
 
-// This fork ships a native (non-EE) API-keys backend, so the API-keys feature
-// is unlocked in the OSS build regardless of any enterprise license.
-const FORK_ENABLED_FEATURES: string[] = [Feature.API_KEYS];
+// Features whose enforcement logic ships natively in this fork (not in the
+// stripped-out ee/ dir), so they are unlocked in the OSS build regardless of
+// any enterprise license. Each entry below has working backend enforcement
+// already wired in — enabling the flag only surfaces the existing toggle:
+//   - API_KEYS: native REST API-keys backend (core/api-key).
+//   - SECURITY_SETTINGS: backend write-gate for restrictApiToAdmins
+//     (core/api-key/api-key.controller enforces at create time),
+//     disablePublicSharing (share.service enforces), and trashRetentionDays
+//     (page/services/trash-cleanup.service runs the retention job).
+//   - SHARING_CONTROLS: frontend gate for the disable-public-sharing toggles
+//     (workspace + space); enforcement lives in share.service.
+//   - RETENTION: frontend gate for the trash-retention config; the cleanup
+//     job already honors the stored value.
+//   - VIEWER_COMMENTS: frontend + space-service gate for letting viewers
+//     comment; enforced in page-access.service (validateCanComment).
+// TEMPLATES is intentionally excluded: allowMemberTemplates has no enforcement
+// and the template CRUD backend lives in the (empty) ee/ dir.
+const FORK_ENABLED_FEATURES: string[] = [
+  Feature.API_KEYS,
+  Feature.SECURITY_SETTINGS,
+  Feature.SHARING_CONTROLS,
+  Feature.RETENTION,
+  Feature.VIEWER_COMMENTS,
+];
 
 @Injectable()
 export class LicenseCheckService {
