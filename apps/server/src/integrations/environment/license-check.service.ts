@@ -21,6 +21,10 @@ import { Feature } from '../../common/features';
 //   - TEMPLATES: native page-templates backend (core/template) — CRUD +
 //     "use template" instantiation, with space/global access control and the
 //     allowMemberTemplates gate enforced in template.controller.
+//   - MCP: native read-only, space-scoped MCP server (core/mcp). The settings
+//     UI toggle + the workspace write-gate (workspace.service.ts) both go
+//     through hasFeature('mcp'); the /mcp endpoint enforces space membership
+//     natively via SpaceAbilityFactory.
 const FORK_ENABLED_FEATURES: string[] = [
   Feature.API_KEYS,
   Feature.SECURITY_SETTINGS,
@@ -28,6 +32,7 @@ const FORK_ENABLED_FEATURES: string[] = [
   Feature.RETENTION,
   Feature.VIEWER_COMMENTS,
   Feature.TEMPLATES,
+  Feature.MCP,
 ];
 
 @Injectable()

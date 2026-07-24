@@ -30,6 +30,11 @@ On top of the `v0.95.0` base:
   enforcement already ships natively (see `license-check.service.ts` `FORK_ENABLED_FEATURES`)
 - `fix: D2 diagram rendering — serialize shared instance + readable compile errors (#7)`
 - `ci: publish fork image to GHCR` — `.github/workflows/fork-image.yml`
+- `feat: native read-only MCP server (#10)` — native (non-EE) space-scoped MCP backend
+  (`core/mcp`) served at top-level `/mcp`, authenticated with a workspace API key (reuses
+  `JwtAuthGuard`). Read-only tools only; every space-touching tool enforces space membership via
+  `SpaceAbilityFactory` before calling the backing service. Unlocks `Feature.MCP` in
+  `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
 
 None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
 adoption low-conflict.
