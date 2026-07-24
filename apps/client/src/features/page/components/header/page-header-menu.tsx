@@ -9,6 +9,8 @@ import {
   IconHistory,
   IconLink,
   IconList,
+  IconLock,
+  IconLockOpen,
   IconMarkdown,
   IconMessage,
   IconPaperclip,
@@ -27,7 +29,17 @@ import { historyAtoms } from "@/features/page-history/atoms/history-atoms.ts";
 import { useDisclosure, useHotkeys } from "@mantine/hooks";
 import { useClipboard } from "@/hooks/use-clipboard";
 import { useParams } from "react-router-dom";
-import { usePageQuery } from "@/features/page/queries/page-query.ts";
+import {
+  usePageQuery,
+  useLockPageMutation,
+} from "@/features/page/queries/page-query.ts";
+import { currentUserAtom } from "@/features/user/atoms/current-user-atom.ts";
+import { useGetSpaceBySlugQuery } from "@/features/space/queries/space-query.ts";
+import { useSpaceAbility } from "@/features/space/permissions/use-space-ability.ts";
+import {
+  SpaceCaslAction,
+  SpaceCaslSubject,
+} from "@/features/space/permissions/permissions.type.ts";
 import { buildPageUrl } from "@/features/page/page.utils.ts";
 import { notifications } from "@mantine/notifications";
 import { getAppUrl } from "@/lib/config.ts";
@@ -114,6 +126,20 @@ export default function PageHeaderMenu({ readOnly }: PageHeaderMenuProps) {
     <>
       <ConnectionWarning />
 
+      {page?.isLocked && (
+        <Tooltip label={t("This page is locked")} openDelay={250} withArrow>
+          <ThemeIcon
+            variant="default"
+            c="dimmed"
+            role="img"
+            aria-label={t("This page is locked")}
+            style={{ border: "none" }}
+          >
+            <IconLock size={20} stroke={2} />
+          </ThemeIcon>
+        </Tooltip>
+      )}
+
       {!readOnly && !page?.isBase && <PageEditModeToggle size="xs" />}
 
       <PageShareModal readOnly={readOnly} />
@@ -187,6 +213,18 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
   const { data: watchStatus } = useWatchStatusQuery(page?.id);
   const watchPage = useWatchPageMutation();
   const unwatchPage = useUnwatchPageMutation();
+  const currentUser = useAtomValue(currentUserAtom);
+  const { data: space } = useGetSpaceBySlugQuery(spaceSlug);
+  const spaceAbility = useSpaceAbility(space?.membership?.permissions);
+  const lockPageMutation = useLockPageMutation();
+  // Locking is an ownership action: only the page owner (creator) or a space
+  // admin may toggle it. The server enforces the same rule.
+  const isPageOwner = currentUser?.user?.id === page?.creatorId;
+  const isSpaceAdmin = spaceAbility.can(
+    SpaceCaslAction.Manage,
+    SpaceCaslSubject.Settings,
+  );
+  const canManageLock = !page?.isBase && (isPageOwner || isSpaceAdmin);
 
   const handleCopyLink = () => {
     const pageUrl =
@@ -239,6 +277,11 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
     } else {
       addFavoriteMutation.mutate(params);
     }
+  };
+
+  const handleToggleLock = () => {
+    if (!page?.id) return;
+    lockPageMutation.mutate({ pageId: page.id, isLocked: !page.isLocked });
   };
 
   return (
@@ -341,6 +384,21 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
               onClick={handleOpenPresentation}
             >
               {t("Presentation mode")}
+            </Menu.Item>
+          )}
+
+          {canManageLock && (
+            <Menu.Item
+              leftSection={
+                page?.isLocked ? (
+                  <IconLockOpen size={16} />
+                ) : (
+                  <IconLock size={16} />
+                )
+              }
+              onClick={handleToggleLock}
+            >
+              {page?.isLocked ? t("Unlock page") : t("Lock page")}
             </Menu.Item>
           )}
 

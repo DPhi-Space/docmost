@@ -18,6 +18,7 @@ import { UpdatePageDto } from './dto/update-page.dto';
 import { MovePageDto, MovePageToSpaceDto } from './dto/move-page.dto';
 import {
   DeletePageDto,
+  LockPageDto,
   PageHistoryIdDto,
   PageIdDto,
   PageInfoDto,
@@ -304,6 +305,47 @@ export class PageController {
           : jsonToHtml(updatedPage.content);
       return { ...updatedPage, content: contentOutput, permissions };
     }
+
+    return { ...updatedPage, permissions };
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('lock')
+  async lock(@Body() dto: LockPageDto, @AuthUser() user: User) {
+    const page = await this.pageRepo.findById(dto.pageId);
+
+    if (!page) {
+      throw new NotFoundException('Page not found');
+    }
+
+    // Locking is an ownership action, not a content edit: the page owner
+    // (creator) or a space admin may toggle it. This intentionally bypasses
+    // validateCanEdit — a locked page reports canEdit=false for everyone but
+    // the owner, so routing through the edit gate would make unlocking
+    // impossible. createForUser throws for non-members, covering that case.
+    const ability = await this.spaceAbility.createForUser(user, page.spaceId);
+    const isOwner = page.creatorId === user.id;
+    const isSpaceAdmin = ability.can(
+      SpaceCaslAction.Manage,
+      SpaceCaslSubject.Settings,
+    );
+
+    if (!isOwner && !isSpaceAdmin) {
+      throw new ForbiddenException();
+    }
+
+    await this.pageRepo.updatePage({ isLocked: dto.isLocked }, page.id);
+
+    const updatedPage = await this.pageRepo.findById(page.id, {
+      includeCreator: true,
+      includeLastUpdatedBy: true,
+    });
+
+    const permissions =
+      await this.pageAccessService.validateCanViewWithPermissions(
+        updatedPage,
+        user,
+      );
 
     return { ...updatedPage, permissions };
   }

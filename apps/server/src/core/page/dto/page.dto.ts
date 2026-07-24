@@ -46,3 +46,8 @@ export class DeletePageDto extends PageIdDto {
   @IsBoolean()
   permanentlyDelete?: boolean;
 }
+
+export class LockPageDto extends PageIdDto {
+  @IsBoolean()
+  isLocked: boolean;
+}

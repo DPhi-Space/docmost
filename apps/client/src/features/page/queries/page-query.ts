@@ -21,6 +21,7 @@ import {
   getAllSidebarPages,
   getDeletedPages,
   restorePage,
+  lockPage,
 } from "@/features/page/services/page-service";
 import {
   IMovePage,
@@ -120,6 +121,27 @@ export function useUpdatePageMutation() {
     mutationFn: (data) => updatePage(data),
     onSuccess: (data) => {
       updatePageData(data);
+    },
+  });
+}
+
+export function useLockPageMutation() {
+  const { t } = useTranslation();
+  return useMutation<IPage, Error, { pageId: string; isLocked: boolean }>({
+    mutationFn: (data) => lockPage(data),
+    onSuccess: (data) => {
+      // Merges the fresh permissions.canEdit into the page cache, which flips
+      // the editor to read-only (or back) for the acting user immediately.
+      updatePageData(data);
+      notifications.show({
+        message: data.isLocked ? t("Page locked") : t("Page unlocked"),
+      });
+    },
+    onError: () => {
+      notifications.show({
+        message: t("You are not allowed to change this page's lock"),
+        color: "red",
+      });
     },
   });
 }

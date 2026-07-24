@@ -443,13 +443,38 @@ export class PagePermissionRepo {
         `.execute(this.db);
 
         const row = result.rows[0];
+
+        // Fork feature: page lock. A locked page is editable only by its owner
+        // (the page creator). Modeled here as a synthetic restriction so this
+        // single edit-permission chokepoint propagates the lock everywhere —
+        // REST (validateCanEdit), realtime collab (Hocuspocus readOnly), and the
+        // client permissions payload — without editing those call sites. It only
+        // ever removes edit rights; canAccess (view) is left untouched, so a
+        // locked page stays readable to everyone the space/page rules allow.
+        const lock = await sql<{
+          isLocked: boolean;
+          creatorId: string | null;
+        }>`SELECT is_locked AS "isLocked", creator_id AS "creatorId" FROM pages WHERE id = ${pageId}::uuid`.execute(
+          this.db,
+        );
+        const lockRow = lock.rows[0];
+        const lockedForUser =
+          !!lockRow?.isLocked && lockRow.creatorId !== userId;
+
         if (!row || row.canAccess === null) {
+          // No page_access restrictions on this page or its ancestors.
+          if (lockedForUser) {
+            return { hasAnyRestriction: true, canAccess: true, canEdit: false };
+          }
           return { hasAnyRestriction: false, canAccess: true, canEdit: true };
         }
+
+        // Has restricted ancestors; a lock can only further remove edit,
+        // never grant access the restrictions already withhold.
         return {
           hasAnyRestriction: true,
           canAccess: row.canAccess,
-          canEdit: row.canAccess && (row.canEdit ?? false),
+          canEdit: row.canAccess && (row.canEdit ?? false) && !lockedForUser,
         };
       },
       opts,
