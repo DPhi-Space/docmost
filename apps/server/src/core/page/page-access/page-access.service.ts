@@ -56,15 +56,24 @@ export class PageAccessService {
   async validateCanViewWithPermissions(
     page: Page,
     user: User,
-  ): Promise<{ canEdit: boolean; hasRestriction: boolean }> {
+  ): Promise<{
+    canEdit: boolean;
+    hasRestriction: boolean;
+    canManageShare: boolean;
+  }> {
     const ability = await this.spaceAbility.createForUser(user, page.spaceId);
 
     if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
       throw new ForbiddenException();
     }
 
-    const { hasAnyRestriction, canAccess, canEdit } =
-      await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
+    const {
+      hasRealRestriction,
+      hasAnyRestriction,
+      canAccess,
+      canEdit,
+      canEditIgnoringLock,
+    } = await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
 
     if (hasAnyRestriction && !canAccess) {
       throw new ForbiddenException();
@@ -74,7 +83,16 @@ export class PageAccessService {
       canEdit: hasAnyRestriction
         ? canEdit
         : ability.can(SpaceCaslAction.Edit, SpaceCaslSubject.Page),
-      hasRestriction: hasAnyRestriction,
+      // Reported to the client as `permissions.hasRestriction`, where it gates
+      // public sharing. A page lock removes edit rights but must not make the
+      // page unshareable, so this reports only genuine page_access restrictions
+      // — enforcement above still routes on hasAnyRestriction.
+      hasRestriction: hasRealRestriction,
+      // Lets the client enable the publish controls on a locked page. Mirrors
+      // validateCanManageShare, which is what actually enforces it.
+      canManageShare: hasRealRestriction
+        ? canEditIgnoringLock
+        : ability.can(SpaceCaslAction.Edit, SpaceCaslSubject.Page),
     };
   }
 
@@ -94,7 +112,7 @@ export class PageAccessService {
       throw new ForbiddenException();
     }
 
-    const { hasAnyRestriction, canEdit } =
+    const { hasRealRestriction, hasAnyRestriction, canEdit } =
       await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
 
     if (hasAnyRestriction) {
@@ -109,7 +127,37 @@ export class PageAccessService {
       }
     }
 
-    return { hasRestriction: hasAnyRestriction };
+    // Client-facing flag: genuine restrictions only, never a lock (see
+    // validateCanViewWithPermissions).
+    return { hasRestriction: hasRealRestriction };
+  }
+
+  /**
+   * Validate user may create, change or remove this page's public share.
+   *
+   * Fork feature: publishing is authority over the page, not a content edit,
+   * so — unlike validateCanEdit — a page lock does not deny it. A frozen page
+   * must stay publishable (and un-publishable) by whoever could publish it
+   * before the freeze. Genuine page_access restrictions still apply, as does
+   * the space-level edit permission when there are none.
+   */
+  async validateCanManageShare(page: Page, user: User): Promise<void> {
+    const ability = await this.spaceAbility.createForUser(user, page.spaceId);
+
+    if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
+      throw new ForbiddenException();
+    }
+
+    const { hasRealRestriction, canEditIgnoringLock } =
+      await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
+
+    if (hasRealRestriction) {
+      if (!canEditIgnoringLock) {
+        throw new ForbiddenException();
+      }
+    } else if (ability.cannot(SpaceCaslAction.Edit, SpaceCaslSubject.Page)) {
+      throw new ForbiddenException();
+    }
   }
 
   /**

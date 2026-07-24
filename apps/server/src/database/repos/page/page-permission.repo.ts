@@ -405,9 +405,24 @@ export class PagePermissionRepo {
     pageId: string,
     opts?: CacheOptions,
   ): Promise<{
+    /**
+     * A genuine page_access restriction exists on this page or an ancestor.
+     * Fork feature: unlike hasAnyRestriction, this is NOT set by a page lock —
+     * it is what the client means by "restricted" (e.g. public sharing is
+     * refused for restricted pages, but must stay allowed for locked ones).
+     */
+    hasRealRestriction: boolean;
+    /** Real restriction OR page lock — the flag that routes edit enforcement. */
     hasAnyRestriction: boolean;
     canAccess: boolean;
     canEdit: boolean;
+    /**
+     * canEdit as it would be if the page were not locked. Fork feature: for
+     * actions that are authority over the page rather than a content edit
+     * (managing its public share), a frozen page must not lock out the people
+     * who could otherwise do them.
+     */
+    canEditIgnoringLock: boolean;
   }> {
     return withCache(
       this.cacheManager,
@@ -444,40 +459,80 @@ export class PagePermissionRepo {
 
         const row = result.rows[0];
 
-        // Fork feature: page lock. A locked page is editable only by its owner
-        // (the page creator). Modeled here as a synthetic restriction so this
-        // single edit-permission chokepoint propagates the lock everywhere —
-        // REST (validateCanEdit), realtime collab (Hocuspocus readOnly), and the
-        // client permissions payload — without editing those call sites. It only
-        // ever removes edit rights; canAccess (view) is left untouched, so a
-        // locked page stays readable to everyone the space/page rules allow.
-        const lock = await sql<{
-          isLocked: boolean;
-          creatorId: string | null;
-        }>`SELECT is_locked AS "isLocked", creator_id AS "creatorId" FROM pages WHERE id = ${pageId}::uuid`.execute(
+        // Fork feature: page lock. A locked page is frozen — read-only for
+        // EVERYONE, including its creator — until it is explicitly unlocked.
+        // Modeled here as a synthetic restriction so this single edit-permission
+        // chokepoint propagates the lock everywhere — REST (validateCanEdit),
+        // realtime collab (Hocuspocus readOnly), and the client permissions
+        // payload — without editing those call sites. Unlocking is a separate,
+        // owner/admin-guarded action (POST /pages/lock) that does not depend on
+        // edit rights, so a lock can never strand the page. The lock only
+        // removes edit; canAccess (view) is left untouched, so a locked page
+        // stays readable to everyone the space/page rules allow.
+        const lock = await sql<{ isLocked: boolean }>`SELECT is_locked AS "isLocked" FROM pages WHERE id = ${pageId}::uuid`.execute(
           this.db,
         );
-        const lockRow = lock.rows[0];
-        const lockedForUser =
-          !!lockRow?.isLocked && lockRow.creatorId !== userId;
+        const isLocked = !!lock.rows[0]?.isLocked;
 
-        if (!row || row.canAccess === null) {
+        // A real (page_access) restriction, as opposed to the synthetic one a
+        // lock produces. Kept separate so "locked" never reads as "restricted"
+        // to callers that gate sharing rather than editing.
+        const hasRealRestriction = !!row && row.canAccess !== null;
+
+        if (!hasRealRestriction) {
           // No page_access restrictions on this page or its ancestors.
-          if (lockedForUser) {
-            return { hasAnyRestriction: true, canAccess: true, canEdit: false };
+          if (isLocked) {
+            return {
+              hasRealRestriction: false,
+              hasAnyRestriction: true,
+              canAccess: true,
+              canEdit: false,
+              canEditIgnoringLock: true,
+            };
           }
-          return { hasAnyRestriction: false, canAccess: true, canEdit: true };
+          return {
+            hasRealRestriction: false,
+            hasAnyRestriction: false,
+            canAccess: true,
+            canEdit: true,
+            canEditIgnoringLock: true,
+          };
         }
 
         // Has restricted ancestors; a lock can only further remove edit,
         // never grant access the restrictions already withhold.
+        const canEditIgnoringLock = row.canAccess && (row.canEdit ?? false);
         return {
+          hasRealRestriction: true,
           hasAnyRestriction: true,
           canAccess: row.canAccess,
-          canEdit: row.canAccess && (row.canEdit ?? false) && !lockedForUser,
+          canEdit: canEditIgnoringLock && !isLocked,
+          canEditIgnoringLock,
         };
       },
       opts,
+    );
+  }
+
+  /**
+   * Drop this user's memoized canUserEditPage results for the given pages.
+   *
+   * canUserEditPage is cached for PERMISSION_CACHE_TTL_MS, which is fine for
+   * permission changes that self-heal, but not for an action whose own
+   * response must already reflect the change — locking a page would otherwise
+   * report the pre-lock canEdit for up to 5s and leave the acting user's
+   * editor writable. Other users still self-heal on the TTL.
+   */
+  async invalidateCanEditCache(
+    userId: string,
+    pageIds: string[],
+  ): Promise<void> {
+    await Promise.all(
+      pageIds.map((pageId) =>
+        this.cacheManager
+          .del(CacheKey.PAGE_CAN_EDIT(userId, pageId))
+          .catch(() => undefined),
+      ),
     );
   }
 

@@ -127,14 +127,30 @@ export function useUpdatePageMutation() {
 
 export function useLockPageMutation() {
   const { t } = useTranslation();
-  return useMutation<IPage, Error, { pageId: string; isLocked: boolean }>({
+  return useMutation<
+    IPage,
+    Error,
+    { pageId: string; isLocked: boolean; recursive?: boolean }
+  >({
     mutationFn: (data) => lockPage(data),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
       // Merges the fresh permissions.canEdit into the page cache, which flips
       // the editor to read-only (or back) for the acting user immediately.
       updatePageData(data);
+
+      if (variables.recursive) {
+        // Sub-pages were toggled server-side; drop their cached lock state.
+        queryClient.invalidateQueries({ queryKey: ["pages"] });
+      }
+
       notifications.show({
-        message: data.isLocked ? t("Page locked") : t("Page unlocked"),
+        message: variables.recursive
+          ? data.isLocked
+            ? t("Page and sub-pages locked")
+            : t("Page and sub-pages unlocked")
+          : data.isLocked
+            ? t("Page locked")
+            : t("Page unlocked"),
       });
     },
     onError: () => {

@@ -28,6 +28,9 @@ export interface IPage {
   permissions?: {
     canEdit: boolean;
     hasRestriction: boolean;
+    // Publishing is lock-agnostic, so it has its own flag: a locked page is
+    // read-only (canEdit false) but stays publishable.
+    canManageShare?: boolean;
   };
 }
 

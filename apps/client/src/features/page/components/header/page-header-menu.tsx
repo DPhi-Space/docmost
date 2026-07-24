@@ -60,6 +60,7 @@ import { PageEditModeToggle } from "@/features/user/components/page-state-pref.t
 import MovePageModal from "@/features/page/components/move-page-modal.tsx";
 import PageAttachmentsModal from "@/features/attachments/components/page-attachments-modal.tsx";
 import PresentationModal from "@/features/editor/components/presentation/presentation-modal.tsx";
+import LockPageModal from "@/features/page/components/lock-page-modal.tsx";
 import { useTimeAgo } from "@/hooks/use-time-ago.tsx";
 import { PageShareModal } from "@/ee/page-permission";
 import {
@@ -142,7 +143,10 @@ export default function PageHeaderMenu({ readOnly }: PageHeaderMenuProps) {
 
       {!readOnly && !page?.isBase && <PageEditModeToggle size="xs" />}
 
-      <PageShareModal readOnly={readOnly} />
+      {/* The share modal forwards `readOnly` to its publish controls only, and
+          publishing is lock-agnostic (see PageAccessService.validateCanManageShare),
+          so it gets its own signal rather than the editor's. */}
+      <PageShareModal readOnly={!(page?.permissions?.canManageShare ?? !readOnly)} />
 
       <Tooltip label={t("Comments")} openDelay={250} withArrow>
         <ActionIcon
@@ -203,6 +207,10 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
   const [
     presentationOpened,
     { open: openPresentationModal, close: closePresentationModal },
+  ] = useDisclosure(false);
+  const [
+    lockPageModalOpened,
+    { open: openLockPageModal, close: closeLockPageModal },
   ] = useDisclosure(false);
   const [pageEditor] = useAtom(pageEditorAtom);
   const pageUpdatedAt = useTimeAgo(page?.updatedAt);
@@ -279,9 +287,13 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
     }
   };
 
-  const handleToggleLock = () => {
+  const handleToggleLock = (recursive: boolean) => {
     if (!page?.id) return;
-    lockPageMutation.mutate({ pageId: page.id, isLocked: !page.isLocked });
+    lockPageMutation.mutate({
+      pageId: page.id,
+      isLocked: !page.isLocked,
+      recursive,
+    });
   };
 
   return (
@@ -396,7 +408,7 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
                   <IconLock size={16} />
                 )
               }
-              onClick={handleToggleLock}
+              onClick={openLockPageModal}
             >
               {page?.isLocked ? t("Unlock page") : t("Lock page")}
             </Menu.Item>
@@ -497,6 +509,13 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
         currentSpaceSlug={spaceSlug}
         onClose={closeMoveSpaceModal}
         open={movePageModalOpened}
+      />
+
+      <LockPageModal
+        opened={lockPageModalOpened}
+        isLocked={!!page?.isLocked}
+        onClose={closeLockPageModal}
+        onConfirm={handleToggleLock}
       />
 
       <PageVerificationModal

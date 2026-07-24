@@ -155,10 +155,12 @@ export class ShareController {
       throw new NotFoundException('Page not found');
     }
 
-    // User must be able to edit the page to create a share
+    // User must have write authority over the page to create a share. A page
+    // lock deliberately does not block this — publishing is orthogonal to
+    // editing, so a frozen page stays publishable.
     //TODO: i dont think this is neccessary if we prevent restricted pages from getting shared
     // rather, use space level permission and workspace/space level sharing restriction
-    await this.pageAccessService.validateCanEdit(page, user);
+    await this.pageAccessService.validateCanManageShare(page, user);
 
     // Prevent sharing restricted pages
     const isRestricted = await this.pagePermissionRepo.hasRestrictedAncestor(
@@ -211,8 +213,8 @@ export class ShareController {
       throw new NotFoundException('Page not found');
     }
 
-    // User must be able to edit the page to update its share
-    await this.pageAccessService.validateCanEdit(page, user);
+    // Write authority over the page, lock-agnostic (see create)
+    await this.pageAccessService.validateCanManageShare(page, user);
 
     return this.shareService.updateShare(
       share.id,
@@ -236,8 +238,8 @@ export class ShareController {
       throw new NotFoundException('Page not found');
     }
 
-    // User must be able to edit the page to delete its share
-    await this.pageAccessService.validateCanEdit(page, user);
+    // Write authority over the page, lock-agnostic (see create)
+    await this.pageAccessService.validateCanManageShare(page, user);
 
     await this.shareRepo.deleteShare(share.id);
 

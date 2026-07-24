@@ -37,6 +37,7 @@ import {
 } from '../casl/interfaces/space-ability.type';
 import SpaceAbilityFactory from '../casl/abilities/space-ability.factory';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
+import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { RecentPageDto } from './dto/recent-page.dto';
 import { CreatedByUserDto } from './dto/created-by-user.dto';
 import { DuplicatePageDto } from './dto/duplicate-page.dto';
@@ -61,6 +62,7 @@ export class PageController {
   constructor(
     private readonly pageService: PageService,
     private readonly pageRepo: PageRepo,
+    private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly pageHistoryService: PageHistoryService,
     private readonly spaceAbility: SpaceAbilityFactory,
     private readonly pageAccessService: PageAccessService,
@@ -86,10 +88,10 @@ export class PageController {
       throw new NotFoundException('Page not found');
     }
 
-    const { canEdit, hasRestriction } =
+    const { canEdit, hasRestriction, canManageShare } =
       await this.pageAccessService.validateCanViewWithPermissions(page, user);
 
-    const permissions = { canEdit, hasRestriction };
+    const permissions = { canEdit, hasRestriction, canManageShare };
 
     if (dto.format && dto.format !== 'json' && page.content) {
       const contentOutput =
@@ -238,10 +240,10 @@ export class PageController {
       createPageDto,
     );
 
-    const { canEdit, hasRestriction } =
+    const { canEdit, hasRestriction, canManageShare } =
       await this.pageAccessService.validateCanViewWithPermissions(page, user);
 
-    const permissions = { canEdit, hasRestriction };
+    const permissions = { canEdit, hasRestriction, canManageShare };
 
     this.auditService.log({
       event: AuditEvent.PAGE_CREATED,
@@ -320,9 +322,9 @@ export class PageController {
 
     // Locking is an ownership action, not a content edit: the page owner
     // (creator) or a space admin may toggle it. This intentionally bypasses
-    // validateCanEdit — a locked page reports canEdit=false for everyone but
-    // the owner, so routing through the edit gate would make unlocking
-    // impossible. createForUser throws for non-members, covering that case.
+    // validateCanEdit — a locked page reports canEdit=false for everyone, so
+    // routing through the edit gate would make unlocking impossible.
+    // createForUser throws for non-members, covering that case.
     const ability = await this.spaceAbility.createForUser(user, page.spaceId);
     const isOwner = page.creatorId === user.id;
     const isSpaceAdmin = ability.can(
@@ -334,7 +336,28 @@ export class PageController {
       throw new ForbiddenException();
     }
 
-    await this.pageRepo.updatePage({ isLocked: dto.isLocked }, page.id);
+    // Recursive lock is a cascade, not inheritance: every descendant gets its
+    // own is_locked, so enforcement stays a plain per-page check. Toggling
+    // cascades in both directions and does not preserve children that were
+    // locked on their own.
+    let pageIds = [page.id];
+    if (dto.recursive) {
+      const subtree = await this.pageRepo.getPageAndDescendants(page.id, {
+        includeContent: false,
+      });
+      // Includes the root; soft-deleted pages are already excluded (the
+      // traversal returns nothing at all if the root itself is in the trash).
+      if (subtree.length > 0) {
+        pageIds = subtree.map((p) => p.id);
+      }
+    }
+
+    await this.pageRepo.updatePages({ isLocked: dto.isLocked }, pageIds);
+
+    // The edit-permission chokepoint memoizes for 5s. Drop this user's entries
+    // so the response below — and therefore their editor — reflects the new
+    // lock state at once; everyone else self-heals on the TTL as usual.
+    await this.pagePermissionRepo.invalidateCanEditCache(user.id, pageIds);
 
     const updatedPage = await this.pageRepo.findById(page.id, {
       includeCreator: true,

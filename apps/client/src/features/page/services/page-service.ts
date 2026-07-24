@@ -35,6 +35,7 @@ export async function updatePage(data: Partial<IPageInput>): Promise<IPage> {
 export async function lockPage(data: {
   pageId: string;
   isLocked: boolean;
+  recursive?: boolean;
 }): Promise<IPage> {
   const req = await api.post<IPage>("/pages/lock", data);
   return req.data;

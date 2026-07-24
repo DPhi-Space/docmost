@@ -50,4 +50,9 @@ export class DeletePageDto extends PageIdDto {
 export class LockPageDto extends PageIdDto {
   @IsBoolean()
   isLocked: boolean;
+
+  /** Apply the same lock state to every sub-page of this page. */
+  @IsOptional()
+  @IsBoolean()
+  recursive?: boolean;
 }
