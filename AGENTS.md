@@ -35,6 +35,7 @@ On top of the `v0.95.0` base:
   `JwtAuthGuard`). Read-only tools only; every space-touching tool enforces space membership via
   `SpaceAbilityFactory` before calling the backing service. Unlocks `Feature.MCP` in
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
+- other commits not mentioned here
 
 None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
 adoption low-conflict.
