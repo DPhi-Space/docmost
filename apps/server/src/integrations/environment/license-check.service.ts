@@ -18,14 +18,16 @@ import { Feature } from '../../common/features';
 //     job already honors the stored value.
 //   - VIEWER_COMMENTS: frontend + space-service gate for letting viewers
 //     comment; enforced in page-access.service (validateCanComment).
-// TEMPLATES is intentionally excluded: allowMemberTemplates has no enforcement
-// and the template CRUD backend lives in the (empty) ee/ dir.
+//   - TEMPLATES: native page-templates backend (core/template) — CRUD +
+//     "use template" instantiation, with space/global access control and the
+//     allowMemberTemplates gate enforced in template.controller.
 const FORK_ENABLED_FEATURES: string[] = [
   Feature.API_KEYS,
   Feature.SECURITY_SETTINGS,
   Feature.SHARING_CONTROLS,
   Feature.RETENTION,
   Feature.VIEWER_COMMENTS,
+  Feature.TEMPLATES,
 ];
 
 @Injectable()
