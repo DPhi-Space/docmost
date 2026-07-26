@@ -27,6 +27,9 @@ export default function McpSettings() {
   const { t } = useTranslation();
   const [workspace, setWorkspace] = useAtom(workspaceAtom);
   const [checked, setChecked] = useState(workspace?.settings?.ai?.mcp);
+  const [writeChecked, setWriteChecked] = useState(
+    workspace?.settings?.ai?.mcpWrite,
+  );
   const hasAccess = useHasFeature(Feature.MCP);
   const upgradeLabel = useUpgradeLabel();
 
@@ -37,6 +40,24 @@ export default function McpSettings() {
     try {
       const updatedWorkspace = await updateWorkspace({ mcpEnabled: value });
       setChecked(value);
+      setWorkspace(updatedWorkspace);
+    } catch (err) {
+      notifications.show({
+        message: err?.response?.data?.message,
+        color: "red",
+      });
+    }
+  };
+
+  const handleWriteChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const value = event.currentTarget.checked;
+    try {
+      const updatedWorkspace = await updateWorkspace({
+        mcpWriteEnabled: value,
+      });
+      setWriteChecked(value);
       setWorkspace(updatedWorkspace);
     } catch (err) {
       notifications.show({
@@ -82,6 +103,27 @@ export default function McpSettings() {
       </Group>
 
       {checked && (
+        <Group justify="space-between" wrap="nowrap" gap="xl">
+          <div>
+            <Text size="md">{t("Allow write access")}</Text>
+            <Text size="sm" c="dimmed">
+              {t(
+                "Let assistants create, update and trash pages. Writes obey the same space, page and lock permissions as the editor, and trashed pages stay restorable. Off by default — turn this off again at any time to stop all MCP writes immediately.",
+              )}
+            </Text>
+          </div>
+
+          <Tooltip label={upgradeLabel} disabled={hasAccess} refProp="rootRef">
+            <Switch
+              defaultChecked={writeChecked}
+              onChange={handleWriteChange}
+              disabled={!hasAccess}
+            />
+          </Tooltip>
+        </Group>
+      )}
+
+      {checked && (
         <div>
           <Text size="sm" fw={500} mb={4}>
             {t("MCP Server URL")}
@@ -117,7 +159,7 @@ export default function McpSettings() {
               {t("Supported tools")}
             </Text>
             <Text size="xs" c="dimmed" mb={4}>
-              {t("This server is read-only.")}
+              {t("Read")}
             </Text>
             <List size="sm" spacing={2}>
               <List.Item>
@@ -136,6 +178,24 @@ export default function McpSettings() {
                 </Text>
               </List.Item>
             </List>
+
+            <Text size="xs" c="dimmed" mt="sm" mb={4}>
+              {writeChecked
+                ? t("Write (enabled)")
+                : t("Write (disabled — not exposed to assistants)")}
+            </Text>
+            <List size="sm" spacing={2}>
+              <List.Item>
+                <Text size="sm" c="dimmed" span>
+                  create_page, update_page, delete_page
+                </Text>
+              </List.Item>
+            </List>
+            <Text size="xs" c="dimmed" mt={4}>
+              {t(
+                "delete_page moves a page to the trash; permanent deletion is never available over MCP.",
+              )}
+            </Text>
           </div>
         </div>
       )}

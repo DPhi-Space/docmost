@@ -43,6 +43,12 @@ export class UpdateWorkspaceDto extends PartialType(CreateWorkspaceDto) {
   @IsBoolean()
   mcpEnabled: boolean;
 
+  // Fork feature (#15): opt-in switch for the MCP write tools. Separate from
+  // mcpEnabled so turning MCP on never silently grants write access.
+  @IsOptional()
+  @IsBoolean()
+  mcpWriteEnabled: boolean;
+
   @IsOptional()
   @IsBoolean()
   isScimEnabled: boolean;

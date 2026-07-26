@@ -9,8 +9,9 @@ import { SearchModule } from '../search/search.module';
 
 /**
  * Native (non-EE) MCP backend. Imports the feature modules whose services it
- * reuses; SpaceAbilityFactory / WorkspaceAbilityFactory (CaslModule) and the
- * repos (DatabaseModule) are @Global, so they need no explicit import.
+ * reuses; SpaceAbilityFactory / WorkspaceAbilityFactory (CaslModule), the repos
+ * (DatabaseModule), PageAccessService (PageAccessModule), EnvironmentService and
+ * the audit service are all @Global, so they need no explicit import.
  */
 @Module({
   imports: [
