@@ -10,7 +10,12 @@ jest.mock('../comment/comment.service', () => ({
   CommentService: class CommentService {},
 }));
 
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { McpService } from './mcp.service';
 import { SpaceCaslAction, SpaceCaslSubject } from '../casl/interfaces/space-ability.type';
 import {
@@ -31,13 +36,34 @@ describe('McpService authorization boundary', () => {
 
   const userA = { id: 'user-a', workspaceId } as any;
   const workspace = { id: workspaceId, settings: { ai: { mcp: true } } } as any;
+  // Same workspace with the fork's separate write opt-in flipped on (#15).
+  const writeWorkspace = {
+    id: workspaceId,
+    settings: { ai: { mcp: true, mcpWrite: true } },
+  } as any;
 
-  const pageInX = { id: 'page-x', spaceId: spaceX, workspaceId };
-  const pageInY = { id: 'page-y', spaceId: spaceY, workspaceId };
+  const pageInX = { id: 'page-x', slugId: 'slug-x', spaceId: spaceX, workspaceId };
+  const pageInY = { id: 'page-y', slugId: 'slug-y', spaceId: spaceY, workspaceId };
   const pageInOtherWorkspace = {
     id: 'page-z',
+    slugId: 'slug-z',
     spaceId: 'space-z',
     workspaceId: otherWorkspaceId,
+  };
+  // Readable, but not editable: a page the user may view but not write.
+  const readOnlyPageInX = {
+    id: 'page-ro',
+    slugId: 'slug-ro',
+    spaceId: spaceX,
+    workspaceId,
+  };
+  // The fork's page lock. Readable like any page; refused for every write.
+  const lockedPageInX = {
+    id: 'page-locked',
+    slugId: 'slug-locked',
+    spaceId: spaceX,
+    workspaceId,
+    isLocked: true,
   };
 
   // Ability that grants read (member of the space).
@@ -49,11 +75,16 @@ describe('McpService authorization boundary', () => {
   function build(overrides: {
     pages?: Record<string, any>;
     workspaceCanReadMembers?: boolean;
+    spaceCanCreatePages?: boolean;
+    collabRedisDisabled?: boolean;
+    descendants?: Record<string, any[]>;
   } = {}) {
     const pages: Record<string, any> = overrides.pages ?? {
       [pageInX.id]: pageInX,
       [pageInY.id]: pageInY,
       [pageInOtherWorkspace.id]: pageInOtherWorkspace,
+      [readOnlyPageInX.id]: readOnlyPageInX,
+      [lockedPageInX.id]: lockedPageInX,
     };
 
     // Real SpaceAbilityFactory throws NotFoundException for a non-member; only
@@ -86,12 +117,52 @@ describe('McpService authorization boundary', () => {
         .fn()
         .mockResolvedValue({ items: [{ id: spaceX }], meta: {} }),
     };
+    if (overrides.spaceCanCreatePages === false) {
+      memberAbility.cannot.mockImplementation(
+        (action: string, subject: string) =>
+          action === SpaceCaslAction.Create && subject === SpaceCaslSubject.Page,
+      );
+    }
+
     const pageService = {
       getSidebarPages: jest.fn().mockResolvedValue({ items: [], meta: {} }),
+      create: jest
+        .fn()
+        .mockResolvedValue({ ...pageInX, id: 'new-page', title: 'New' }),
+      update: jest.fn(async (page: any) => ({ ...page, title: 'Updated' })),
+      removePage: jest.fn().mockResolvedValue(undefined),
     };
     const pageRepo = {
       findById: jest.fn(async (pageId: string) => pages[pageId] ?? null),
+      // Real traversal returns the root page plus its descendants.
+      getPageAndDescendants: jest.fn(async (pageId: string) => [
+        pages[pageId],
+        ...(overrides.descendants?.[pageId] ?? []),
+      ]),
     };
+
+    // Mirrors the real PageAccessService: a non-member space blows up the way
+    // SpaceAbilityFactory does, and the lock / page-level restriction both
+    // surface as a plain edit denial (the lock is folded into canUserEditPage).
+    const nonEditable = new Set([readOnlyPageInX.id, lockedPageInX.id]);
+    const pageAccessService = {
+      validateCanEdit: jest.fn(async (page: any) => {
+        if (page.spaceId !== spaceX) {
+          throw new NotFoundException('Space permissions not found');
+        }
+        if (nonEditable.has(page.id)) {
+          throw new ForbiddenException();
+        }
+        return { hasRestriction: false };
+      }),
+    };
+
+    const environmentService = {
+      isCollabDisableRedis: jest.fn(
+        () => overrides.collabRedisDisabled === true,
+      ),
+    };
+    const auditService = { log: jest.fn() };
     const commentService = {
       findByPageId: jest.fn().mockResolvedValue({ items: [], meta: {} }),
     };
@@ -112,6 +183,9 @@ describe('McpService authorization boundary', () => {
       commentService as any,
       searchService as any,
       workspaceService as any,
+      pageAccessService as any,
+      environmentService as any,
+      auditService as any,
     );
 
     return {
@@ -124,12 +198,15 @@ describe('McpService authorization boundary', () => {
       commentService,
       searchService,
       workspaceService,
+      pageAccessService,
+      environmentService,
+      auditService,
     };
   }
 
   beforeEach(() => {
-    memberAbility.can.mockClear();
-    memberAbility.cannot.mockClear();
+    memberAbility.can.mockReset().mockReturnValue(true);
+    memberAbility.cannot.mockReset().mockReturnValue(false);
   });
 
   describe('get_page', () => {
@@ -280,6 +357,312 @@ describe('McpService authorization boundary', () => {
         service.listWorkspaceMembers(userA, workspace),
       ).toThrow(ForbiddenException);
       expect(workspaceService.getWorkspaceUsers).not.toHaveBeenCalled();
+    });
+  });
+
+  // -- write tools (issue #15) ------------------------------------------------
+
+  describe('write enablement switch', () => {
+    it('refuses create_page when the workspace write switch is off', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, workspace, { spaceId: spaceX, title: 'Hi' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses update_page when the workspace write switch is off', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.updatePage(userA, workspace, {
+          pageId: pageInX.id,
+          content: 'hello',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses delete_page when the workspace write switch is off', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.deletePage(userA, workspace, { pageId: pageInX.id }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.removePage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('create_page', () => {
+    it('creates at the root of a space the user may create in', async () => {
+      const { service, pageService } = build();
+      const result: any = await service.createPage(userA, writeWorkspace, {
+        spaceId: spaceX,
+        title: 'Notes',
+        content: '# hi',
+        format: 'markdown',
+      });
+      expect(pageService.create).toHaveBeenCalledWith(
+        userA.id,
+        workspaceId,
+        expect.objectContaining({
+          spaceId: spaceX,
+          title: 'Notes',
+          content: '# hi',
+          format: 'markdown',
+        }),
+      );
+      expect(result.id).toBe('new-page');
+    });
+
+    it('checks the space-level create ability at the root of a space', async () => {
+      const { service, pageService } = build({ spaceCanCreatePages: false });
+      await expect(
+        service.createPage(userA, writeWorkspace, { spaceId: spaceX }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a space the user is not a member of, and never creates', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, writeWorkspace, { spaceId: spaceY }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('checks edit permission on the parent when nesting under a page', async () => {
+      const { service, pageAccessService, pageService } = build();
+      await service.createPage(userA, writeWorkspace, {
+        spaceId: spaceX,
+        parentPageId: pageInX.id,
+      });
+      expect(pageAccessService.validateCanEdit).toHaveBeenCalledWith(
+        pageInX,
+        userA,
+      );
+      expect(pageService.create).toHaveBeenCalled();
+    });
+
+    it('refuses to nest under a page the user cannot edit', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, writeWorkspace, {
+          spaceId: spaceX,
+          parentPageId: readOnlyPageInX.id,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses to nest under a locked page', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, writeWorkspace, {
+          spaceId: spaceX,
+          parentPageId: lockedPageInX.id,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('reports a parent page in another workspace as not found', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, writeWorkspace, {
+          spaceId: spaceX,
+          parentPageId: pageInOtherWorkspace.id,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects unparseable editor JSON before touching the page service', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.createPage(userA, writeWorkspace, {
+          spaceId: spaceX,
+          content: 'not json',
+          format: 'json',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(pageService.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update_page', () => {
+    it('defaults the content operation to append', async () => {
+      const { service, pageService } = build();
+      await service.updatePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+        content: 'a line',
+      });
+      expect(pageService.update).toHaveBeenCalledWith(
+        pageInX,
+        expect.objectContaining({ operation: 'append', format: 'markdown' }),
+        userA,
+      );
+    });
+
+    it('passes an explicit replace operation through', async () => {
+      const { service, pageService } = build();
+      await service.updatePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+        content: 'all new',
+        operation: 'replace',
+      });
+      expect(pageService.update).toHaveBeenCalledWith(
+        pageInX,
+        expect.objectContaining({ operation: 'replace' }),
+        userA,
+      );
+    });
+
+    it('renames without content and sends no content operation', async () => {
+      const { service, pageService } = build();
+      await service.updatePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+        title: 'Renamed',
+      });
+      const dto: any = (pageService.update.mock.calls as any[])[0][1];
+      expect(dto.title).toBe('Renamed');
+      expect(dto.content).toBeUndefined();
+      expect(dto.operation).toBeUndefined();
+    });
+
+    it('refuses a page the user can read but not edit', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.updatePage(userA, writeWorkspace, {
+          pageId: readOnlyPageInX.id,
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a locked page, which stays readable', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.updatePage(userA, writeWorkspace, {
+          pageId: lockedPageInX.id,
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.update).not.toHaveBeenCalled();
+
+      // The same locked page is still readable over MCP.
+      await expect(
+        service.getPage(userA, writeWorkspace, lockedPageInX.id),
+      ).resolves.toBe(lockedPageInX);
+    });
+
+    it('refuses a page in a space the user is not a member of', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.updatePage(userA, writeWorkspace, {
+          pageId: pageInY.id,
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.update).not.toHaveBeenCalled();
+    });
+
+    it('reports a page in another workspace as not found', async () => {
+      const { service, pageAccessService } = build();
+      await expect(
+        service.updatePage(userA, writeWorkspace, {
+          pageId: pageInOtherWorkspace.id,
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(pageAccessService.validateCanEdit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a content write when the collaboration Redis backend is disabled', async () => {
+      const { service, pageService } = build({ collabRedisDisabled: true });
+      await expect(
+        service.updatePage(userA, writeWorkspace, {
+          pageId: pageInX.id,
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(pageService.update).not.toHaveBeenCalled();
+    });
+
+    it('still allows a title-only update without the collaboration backend', async () => {
+      const { service, pageService } = build({ collabRedisDisabled: true });
+      await service.updatePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+        title: 'Renamed',
+      });
+      expect(pageService.update).toHaveBeenCalled();
+    });
+  });
+
+  describe('delete_page', () => {
+    it('trashes a childless page the user can edit', async () => {
+      const { service, pageService } = build();
+      const result: any = await service.deletePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+      });
+      expect(pageService.removePage).toHaveBeenCalledWith(
+        pageInX.id,
+        userA.id,
+        workspaceId,
+      );
+      expect(result).toMatchObject({ trashed: true, descendantsTrashed: 0 });
+    });
+
+    it('refuses a page with descendants and names the count', async () => {
+      const { service, pageService } = build({
+        descendants: { [pageInX.id]: [{ id: 'c1' }, { id: 'c2' }] },
+      });
+      await expect(
+        service.deletePage(userA, writeWorkspace, { pageId: pageInX.id }),
+      ).rejects.toThrow(/2 descendant/);
+      await expect(
+        service.deletePage(userA, writeWorkspace, { pageId: pageInX.id }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(pageService.removePage).not.toHaveBeenCalled();
+    });
+
+    it('trashes the subtree once the caller confirms', async () => {
+      const { service, pageService } = build({
+        descendants: { [pageInX.id]: [{ id: 'c1' }, { id: 'c2' }] },
+      });
+      const result: any = await service.deletePage(userA, writeWorkspace, {
+        pageId: pageInX.id,
+        confirmDeleteChildren: true,
+      });
+      expect(pageService.removePage).toHaveBeenCalled();
+      expect(result.descendantsTrashed).toBe(2);
+    });
+
+    it('refuses a locked page', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.deletePage(userA, writeWorkspace, {
+          pageId: lockedPageInX.id,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.removePage).not.toHaveBeenCalled();
+    });
+
+    it('refuses a page in a space the user is not a member of', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.deletePage(userA, writeWorkspace, { pageId: pageInY.id }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(pageService.removePage).not.toHaveBeenCalled();
+    });
+
+    it('reports a page in another workspace as not found', async () => {
+      const { service, pageService } = build();
+      await expect(
+        service.deletePage(userA, writeWorkspace, {
+          pageId: pageInOtherWorkspace.id,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(pageService.removePage).not.toHaveBeenCalled();
     });
   });
 

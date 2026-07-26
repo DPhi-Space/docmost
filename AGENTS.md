@@ -35,10 +35,47 @@ On top of the `v0.95.0` base:
   `JwtAuthGuard`). Read-only tools only; every space-touching tool enforces space membership via
   `SpaceAbilityFactory` before calling the backing service. Unlocks `Feature.MCP` in
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
+- `feat: MCP page writes (#15)` — adds `create_page` / `update_page` / `delete_page` to the same
+  module (see **MCP write surface** below). Also does not touch collaboration/persistence.
 - other commits not mentioned here
 
 None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
 adoption low-conflict.
+
+## MCP write surface (`core/mcp`, issue #15)
+
+The MCP server exposes nine read tools plus three write tools: `create_page`, `update_page`
+(append / prepend / replace, **append is the default**) and `delete_page` (trash only —
+permanent deletion is never exposed over MCP). They reuse `PageService.create/update/removePage`;
+no new content handling exists in the MCP module.
+
+**Two switches, not one.** `settings.ai.mcp` turns the endpoint on; `settings.ai.mcpWrite`
+(new, defaults to **off**, so existing workspaces stay read-only after upgrade with no
+migration) turns the write tools on. Both live under the same settings namespace, are written
+by `WorkspaceService.updateWorkspace` via `updateAiSettings`, and are licence-gated on the same
+`Feature.MCP`. The client switch pair is in `apps/client/src/ee/ai/components/mcp-settings.tsx`.
+
+**Where enforcement lives.** Both layers are inside `McpService` — deliberately *not* in
+`McpController` — because the service's public tool methods are the only tested seam
+(`mcp.service.spec.ts` constructs the service directly with positional doubles):
+1. `buildServer` registers the three write tools only when the flag is on, so a read-only
+   workspace's `tools/list` contains only the nine read tools.
+2. Each write method re-checks the flag (`requireWriteEnabled`), which is what makes the switch
+   a real kill switch for already-open connections.
+
+**Authorization** is one delegation to `PageAccessService.validateCanEdit`, which already folds
+space membership, page-level restrictions **and the fork's page lock** into one answer. Do not
+add a separate lock check — a second one would be a second place for lock semantics to drift.
+Creation uses the web app's split gate (parent page ⇒ edit on the parent; space root ⇒ space-level
+`Create`/`Page`). Cross-workspace targets report *not found*, never *forbidden*.
+
+**Redis requirement.** `PageService.updatePageContent` routes content through
+`CollaborationGateway.handleYjsEvent`, which is a **silent no-op** when `COLLAB_DISABLE_REDIS=true`
+(the promise resolves, nothing is written). `McpService.updatePage` therefore refuses with a
+`ServiceUnavailableException` before attempting a *content* update. Title/icon-only updates and
+`create_page` are unaffected — creation writes its ydoc directly in `PageService.create`.
+**The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
+mean editing collaboration code, which is the one area this fork keeps untouched.
 
 ## Adopting a newer upstream release
 
