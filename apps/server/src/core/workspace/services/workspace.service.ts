@@ -347,6 +347,7 @@ export class WorkspaceService {
       typeof updateWorkspaceDto.disablePublicSharing !== 'undefined' ||
       typeof updateWorkspaceDto.trashRetentionDays !== 'undefined' ||
       typeof updateWorkspaceDto.mcpEnabled !== 'undefined' ||
+      typeof updateWorkspaceDto.mcpWriteEnabled !== 'undefined' ||
       typeof updateWorkspaceDto.restrictApiToAdmins !== 'undefined' ||
       typeof updateWorkspaceDto.allowMemberTemplates !== 'undefined' ||
       typeof updateWorkspaceDto.isScimEnabled !== 'undefined' ||
@@ -365,7 +366,10 @@ export class WorkspaceService {
         throw new NotFoundException('Workspace not found');
       }
 
-      if (typeof updateWorkspaceDto.mcpEnabled !== 'undefined') {
+      if (
+        typeof updateWorkspaceDto.mcpEnabled !== 'undefined' ||
+        typeof updateWorkspaceDto.mcpWriteEnabled !== 'undefined'
+      ) {
         if (!this.licenseCheckService.hasFeature(ws.licenseKey, 'mcp', ws.plan)) {
           throw new ForbiddenException(
             'This feature requires a valid license',
@@ -575,6 +579,20 @@ export class WorkspaceService {
         );
       }
 
+      if (typeof updateWorkspaceDto.mcpWriteEnabled !== 'undefined') {
+        const prev = settingsBefore?.ai?.mcpWrite ?? false;
+        if (prev !== updateWorkspaceDto.mcpWriteEnabled) {
+          before.mcpWriteEnabled = prev;
+          after.mcpWriteEnabled = updateWorkspaceDto.mcpWriteEnabled;
+        }
+        await this.workspaceRepo.updateAiSettings(
+          workspaceId,
+          'mcpWrite',
+          updateWorkspaceDto.mcpWriteEnabled,
+          trx,
+        );
+      }
+
       if (typeof updateWorkspaceDto.allowMemberTemplates !== 'undefined') {
         const prev = settingsBefore?.templates?.allowMemberTemplates ?? false;
         if (prev !== updateWorkspaceDto.allowMemberTemplates) {
@@ -680,6 +698,7 @@ export class WorkspaceService {
       delete updateWorkspaceDto.allowPublicSpaces;
       delete updateWorkspaceDto.publicSpacesDirectory;
       delete updateWorkspaceDto.mcpEnabled;
+      delete updateWorkspaceDto.mcpWriteEnabled;
       delete updateWorkspaceDto.allowMemberTemplates;
       delete updateWorkspaceDto.aiChat;
       delete updateWorkspaceDto.allowPersonalSpaces;

@@ -30,6 +30,7 @@ export interface IWorkspace {
   aiChatReadOnly?: boolean;
   aiChatWorkspaceKnowledgeOnly?: boolean;
   enforceMcpOauth?: boolean;
+  mcpWriteEnabled?: boolean;
   trashRetentionDays?: number;
   restrictApiToAdmins?: boolean;
   allowMemberTemplates?: boolean;
@@ -57,6 +58,7 @@ export interface IWorkspaceAiSettings {
   generative?: boolean;
   mcp?: boolean;
   enforceMcpOauth?: boolean;
+  mcpWrite?: boolean;
   chat?: boolean;
   chatReadOnly?: boolean;
   chatWorkspaceKnowledgeOnly?: boolean;
