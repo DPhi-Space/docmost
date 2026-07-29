@@ -19,6 +19,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 const ownership = vi.hoisted(() => ({
   reconcileOfflineDataOwnership: vi.fn(async () => "clean" as const),
 }));
+const dirtyPages = vi.hoisted(() => ({
+  setOfflineDataOwner: vi.fn(async () => true),
+}));
+vi.mock("./dirty-pages", () => dirtyPages);
 const manager = vi.hoisted(() => ({
   createResyncManager: vi.fn(() => ({ trigger: vi.fn(), stop: vi.fn() })),
   RESYNC_LOCK_NAME: "docmost-offline-resync",
@@ -56,6 +60,8 @@ describe("useOfflineDataOwnership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     userService.getMyInfo.mockResolvedValue(USER);
+    ownership.reconcileOfflineDataOwnership.mockResolvedValue("clean" as never);
+    dirtyPages.setOfflineDataOwner.mockResolvedValue(true);
     Object.defineProperty(window.navigator, "onLine", {
       value: true,
       configurable: true,
@@ -93,6 +99,69 @@ describe("useOfflineDataOwnership", () => {
     await waitFor(() =>
       expect(localStorage.getItem(OFFLINE_DATA_OWNER_KEY)).toBe("user-1"),
     );
+  });
+
+  it("stamps the disk on every authenticated boot, not only after a 401", async () => {
+    // Two ways existed for offline data to end up unstamped, both read by
+    // reconcile as "nothing preserved, so it is yours": `redirectToLogin` does
+    // not await the cleanup before navigating, and a user landing straight on
+    // /auth/login never fires a 401 at all. Stamping every boot makes an absent
+    // stamp mean "a browser that has never held anyone's offline data".
+    renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper(USER) });
+
+    await waitFor(() =>
+      expect(dirtyPages.setOfflineDataOwner).toHaveBeenCalledWith("user-1"),
+    );
+  });
+
+  it("stamps only after reconcile has decided", async () => {
+    // Ordering is the whole safety argument: stamping first would relabel data
+    // reconcile was about to identify as somebody else's, turning the check
+    // that protects the previous user into the thing that hides them.
+    const order: string[] = [];
+    ownership.reconcileOfflineDataOwnership.mockImplementation(async () => {
+      order.push("reconcile");
+      return "erased" as never;
+    });
+    dirtyPages.setOfflineDataOwner.mockImplementation(async () => {
+      order.push("stamp");
+      return true;
+    });
+
+    renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper(USER) });
+
+    await waitFor(() => expect(order).toEqual(["reconcile", "stamp"]));
+  });
+
+  it("re-writes the owner hint after an erase wiped it", async () => {
+    // Reconcile's erase path runs `clearOfflineData()`, which drops the hint.
+    // Without rewriting it, a 401 later in that same session would find no
+    // hint and destroy the new user's pending work instead of preserving it.
+    ownership.reconcileOfflineDataOwnership.mockImplementation(async () => {
+      localStorage.removeItem(OFFLINE_DATA_OWNER_KEY);
+      return "erased" as never;
+    });
+
+    renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper(USER) });
+
+    await waitFor(() =>
+      expect(localStorage.getItem(OFFLINE_DATA_OWNER_KEY)).toBe("user-1"),
+    );
+  });
+
+  it("stamps nothing while ownership is deferred", async () => {
+    // Nothing decided means nothing claimed.
+    ownership.reconcileOfflineDataOwnership.mockResolvedValue(
+      "deferred" as never,
+    );
+
+    renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper(USER) });
+
+    await waitFor(() =>
+      expect(ownership.reconcileOfflineDataOwnership).toHaveBeenCalled(),
+    );
+    expect(dirtyPages.setOfflineDataOwner).not.toHaveBeenCalled();
+    expect(localStorage.getItem(OFFLINE_DATA_OWNER_KEY)).toBeNull();
   });
 
   it("refuses, rather than settling, when no user can be identified", async () => {

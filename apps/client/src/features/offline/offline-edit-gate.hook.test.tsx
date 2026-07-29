@@ -47,6 +47,7 @@ vi.mock("./dirty-pages", () => ({
     dirty.set(pageId, (dirty.get(pageId) ?? 0) + 1);
   }),
   clearDirtyPage: vi.fn(async (pageId: string) => void dirty.delete(pageId)),
+  readDirtyPages: vi.fn(async () => ({ readable: true, records: [] }) as const),
 }));
 
 import { markPageRemoteSynced } from "./sync-markers";

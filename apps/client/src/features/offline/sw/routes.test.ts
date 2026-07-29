@@ -114,6 +114,67 @@ describe("resolveRoute — locales and files", () => {
   });
 });
 
+/**
+ * The ordering between the API prefixes and the navigation branch, pinned.
+ *
+ * The app downloads attachments with `window.open(downloadUrl)` — a *top-level
+ * navigation* to `/api/files/...`. While the navigation branch came first, such
+ * a request was answered by NetworkFirst, and a file whose first byte took more
+ * than the 3 s timeout was served **the cached application shell instead of the
+ * file**, with the browser fully online. The download produced an HTML page and
+ * nothing about it looked like a caching bug.
+ */
+describe("resolveRoute — API paths win over the navigation branch", () => {
+  it("routes a navigation to a file download as a file, not a navigation", () => {
+    expect(resolveRoute(nav("/api/files/abc/def/report.pdf"), ORIGIN)).toBe(
+      "api-file",
+    );
+  });
+
+  it("routes a file download opened in a new tab as a file", () => {
+    // `window.open` sets both signals; either one alone used to be enough to
+    // divert it into the shell fallback.
+    expect(
+      resolveRoute(req("/api/files/abc/def/big.zip", { mode: "navigate" }), ORIGIN),
+    ).toBe("api-file");
+    expect(
+      resolveRoute(
+        req("/api/files/abc/def/big.zip", { destination: "document" }),
+        ORIGIN,
+      ),
+    ).toBe("api-file");
+  });
+
+  it("never answers any other API navigation with the app shell", () => {
+    // No path under /api/ is an SPA route, so none of them wants the fallback.
+    expect(resolveRoute(nav("/api/pages/export"), ORIGIN)).toBe("passthrough");
+    expect(resolveRoute(nav("/api/attachments/img/x.png"), ORIGIN)).toBe(
+      "passthrough",
+    );
+  });
+
+  it("still routes every real page navigation to the shell fallback", () => {
+    // The offline boot depends on this: a navigation must still be able to
+    // fall back to the last HTML the server actually served.
+    for (const path of [
+      "/",
+      "/home",
+      "/login",
+      "/s/general/p/page-abc123",
+      "/share/custom-slug",
+      "/apidocs",
+      "/api-keys",
+    ]) {
+      expect(resolveRoute(nav(path), ORIGIN)).toBe("navigation");
+    }
+  });
+
+  it("keeps a navigation to a path that merely starts with /api safe", () => {
+    // `/api/` with the trailing slash is the prefix; `/apiary` is a page.
+    expect(resolveRoute(nav("/apiary"), ORIGIN)).toBe("navigation");
+  });
+});
+
 describe("resolveRoute — origins and oddities", () => {
   it("ignores cross-origin requests", () => {
     expect(

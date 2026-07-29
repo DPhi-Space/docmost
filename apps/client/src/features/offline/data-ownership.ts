@@ -48,7 +48,12 @@
 
 import { useSyncExternalStore } from "react";
 import { clearOfflineData } from "./clear-offline-data";
-import { readOfflineDataOwner, type OfflineDataOwner } from "./dirty-pages";
+import {
+  readDirtyPages,
+  readOfflineDataOwner,
+  type DirtyPagesRead,
+  type OfflineDataOwner,
+} from "./dirty-pages";
 
 export type OwnershipStatus =
   /** Not established yet, or established as somebody else's. Refuse. */
@@ -116,6 +121,8 @@ export function useOfflineDataIsOurs(): boolean {
 
 export interface ReconcileDeps {
   readOfflineDataOwner?: () => Promise<OfflineDataOwner>;
+  /** Whether this disk holds offline work at all; see the `"none"` branch. */
+  readDirtyPages?: () => Promise<DirtyPagesRead>;
   clearOfflineData?: () => Promise<void>;
 }
 
@@ -145,6 +152,7 @@ export async function reconcileOfflineDataOwnership(
 ): Promise<ReconcileOutcome> {
   const {
     readOfflineDataOwner: readOwner = readOfflineDataOwner,
+    readDirtyPages: readPages = readDirtyPages,
     clearOfflineData: clear = clearOfflineData,
   } = deps;
 
@@ -162,10 +170,33 @@ export async function reconcileOfflineDataOwnership(
   const owner = await readOwner();
 
   if (owner.status === "none") {
-    // Nothing was preserved through a session expiry, so there is nothing on
-    // this disk that belongs to anyone but the person browsing with it.
+    /**
+     * **No stamp is only benign when there is nothing to own.**
+     *
+     * Every authenticated boot now stamps this disk (`use-offline-resync.ts`),
+     * so an absent stamp should mean "a browser that has never held anyone's
+     * offline data". It is still not *proof* of that — a stamp write can fail
+     * on quota, and a navigation can kill the session-expiry cleanup before it
+     * lands — so the records themselves are consulted rather than trusted to
+     * be absent.
+     *
+     * Unstamped **and empty** is a fresh browser: nothing to protect, nothing
+     * to lose. Unstamped **with work on it** is data nobody has claimed, which
+     * from the next user's point of view is indistinguishable from a
+     * stranger's, and is erased on the same principle as a mismatch. A fresh
+     * browser therefore never pays for this, and a browser that lost its stamp
+     * cannot hand its contents to whoever signs in next.
+     */
+    const pages = await readPages();
+    const holdsWork = !pages.readable || pages.records.length > 0;
+    if (!holdsWork) {
+      setStatus("ours");
+      return "clean";
+    }
+    setStatus("unknown");
+    await clear();
     setStatus("ours");
-    return "clean";
+    return "erased";
   }
 
   if (owner.status === "known" && owner.ownerUserId === currentUserId) {

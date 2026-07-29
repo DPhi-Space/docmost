@@ -141,6 +141,14 @@ lines in a repo where the lockfile is load-bearing. The replacement adds **zero 
    rejects every `.html`, and navigations are **NetworkFirst (3 s timeout)** falling back to a
    single runtime-cached copy of the last HTML the server actually served.
 
+**The API is classified before navigations** (`sw/routes.ts`). The app downloads attachments
+with `window.open(downloadUrl)` — a *top-level navigation* to `/api/files/...`. Classified as a
+navigation it went through NetworkFirst, so a file whose first byte outlasted the 3 s timeout
+was answered with the **cached application shell instead of the file**, while fully online, and
+the download simply produced an HTML page. No path under `/api/` is ever an SPA route, so
+deciding on the path first removes the class; page navigations still reach the shell fallback
+that offline boot depends on, and that ordering is pinned by tests.
+
 Other invariants: non-GET requests and `Range` requests are never intercepted; `/collab` and
 `/socket.io` are never routed (they are WebSocket upgrades, but the exclusion is explicit and
 tested); everything under `/api` except `GET /api/files/*` passes through untouched; and the
@@ -207,6 +215,16 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   sign-in found no notice and checked nothing. Every one ended with the previous user's text on
   screen **and pushed to the server under the new user's identity**. Four rules now hold, and
   they are deliberately redundant because three failures of one hook is a diagnosis:
+  0. **Every authenticated boot stamps the disk** (`use-offline-resync.ts`), strictly *after*
+     reconcile has decided — stamping first would relabel data reconcile was about to identify
+     as somebody else's. Before this the stamp was written only at 401 time, and two paths left
+     data unstamped: `redirectToLogin` does not await the cleanup before assigning
+     `window.location.href`, and a user landing straight on `/auth/login` never fires a 401 at
+     all. Reconcile no longer reads a missing stamp as "yours" either: **unstamped *with records
+     present* erases**, so the guarantee survives a stamp write that fails. A fresh browser has
+     no records and never pays for it. The localStorage hint is re-written in the same breath,
+     because reconcile's erase path drops it and a 401 later in that session would otherwise
+     find no hint and destroy the new user's pending work.
   1. **Nothing is preserved without a provable owner.** No owner hint, or the IndexedDB stamp
      cannot be written ⇒ this is the logout path, work included. Losing work in a case that
      should not arise beats handing it to a stranger.
