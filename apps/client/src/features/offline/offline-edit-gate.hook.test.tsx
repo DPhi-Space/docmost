@@ -53,6 +53,10 @@ import { markPageRemoteSynced } from "./sync-markers";
 import { clearDirtyPage, recordDirtyPage } from "./dirty-pages";
 import { getOpenPage, resetOpenPageForTests } from "./open-page-registry";
 import {
+  reconcileOfflineDataOwnership,
+  resetOwnershipForTests,
+} from "./data-ownership";
+import {
   useOfflineEditGate,
   UNSYNCED_POLL_MS,
   type PageProviders,
@@ -165,10 +169,25 @@ function emitUpdate(doc: Y.Doc, origin: unknown) {
   }, origin);
 }
 
+/**
+ * Settle ownership the way the authenticated shell does, so the gate is
+ * allowed to open at all. Deliberately explicit in each test that needs it:
+ * the default is refusal, and that default is itself under test below.
+ */
+async function ownershipSettled() {
+  await act(async () => {
+    await reconcileOfflineDataOwnership("user-1", {
+      readOfflineDataOwner: async () => ({ status: "none" }),
+      clearOfflineData: async () => {},
+    });
+  });
+}
+
 function reset() {
   markers.clear();
   dirty.clear();
   vi.clearAllMocks();
+  resetOwnershipForTests();
   resetOpenPageForTests();
   resetOfflineEditStateForTests();
   localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
@@ -197,6 +216,7 @@ describe("useOfflineEditGate — the offline editing gate", () => {
   });
 
   it("opens for a marked, populated page on an offline device", async () => {
+    await ownershipSettled();
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
     setOnline(false);
@@ -237,6 +257,7 @@ describe("useOfflineEditGate — the offline editing gate", () => {
   });
 
   it("opens as soon as the emptied document is repopulated", async () => {
+    await ownershipSettled();
     // The same page, once the replay actually delivers something: the gate
     // closes on emptiness, it does not latch shut on a page.
     vi.useFakeTimers();
@@ -255,6 +276,49 @@ describe("useOfflineEditGate — the offline editing gate", () => {
     expect(result.current.gate.canEditOffline).toBe(true);
   });
 
+  it("stays closed until ownership of the offline data is settled", async () => {
+    // The default is refusal. A browser holding a previous user's preserved
+    // documents must not open one in a live editor while the cleanup that
+    // decides whose they are is still running.
+    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
+    setOnline(false);
+    const { bundle } = bundleFor("page-1");
+
+    const { result } = mountGate(providersRef(bundle));
+    await settle();
+    expect(result.current.gate.canEditOffline).toBe(false);
+
+    await ownershipSettled();
+
+    expect(result.current.gate.canEditOffline).toBe(true);
+  });
+
+  it("does not carry one page's marker over to the next", async () => {
+    // The marker is held as *which page* is known synced, never as a boolean:
+    // a boolean survives a route change and hands a never-synced page the
+    // previous page's permission. Page 2 arrives with its own populated
+    // bundle, so emptiness cannot be what closes the gate here — only the
+    // absence of page-2's own marker can.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    await ownershipSettled();
+    markers.set("page-1", 1);
+    setOnline(false);
+    const providers = providersRef(bundleFor("page-1").bundle);
+
+    const { result, rerender } = mountGate(providers);
+    await settle();
+    expect(result.current.gate.canEditOffline).toBe(true);
+
+    rerender({ ...PAGE_2, connectionStatus: "disconnected" });
+    providers.current = bundleFor("page-2").bundle;
+    await settle();
+    await tick(2);
+
+    expect(result.current.gate.canEditOffline).toBe(false);
+  });
+
   it("stays closed while y-indexeddb has not finished loading", async () => {
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
@@ -270,6 +334,7 @@ describe("useOfflineEditGate — the offline editing gate", () => {
   });
 
   it("publishes the offline-editing state the banner renders from", async () => {
+    await ownershipSettled();
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
     setOnline(false);
@@ -375,6 +440,7 @@ describe("useOfflineEditGate — provenance", () => {
     const { bundle } = bundleFor("page-1");
     const providers = providersRef(bundle);
 
+    await ownershipSettled();
     const { result, rerender } = mountGate(providers);
     await settle();
     expect(result.current.gate.canEditOffline).toBe(true);
@@ -622,6 +688,55 @@ describe("useOfflineEditGate — dirty tracking", () => {
 
     expect(recordDirtyPage).toHaveBeenCalledTimes(1);
     expect(recordDirtyPage).toHaveBeenCalledWith("page-2", undefined);
+  });
+
+  it("registers a page whose writes the server is refusing", async () => {
+    // The other shape of unpushed work: a live, synced connection the server
+    // answers with SyncStatus(false). `dirty-tracking` never sees these — it
+    // only watches disconnected providers — so without this the registry would
+    // not know to preserve exactly the edits the banner calls safe.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 3 });
+
+    const { result } = mountGate(providersRef(bundle), {
+      connectionStatus: "connected",
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS + 1_000);
+    });
+
+    expect(result.current.state.unsyncedChangesWarning).toBe(true);
+    expect(recordDirtyPage).toHaveBeenCalledWith("page-1", undefined);
+  });
+
+  it("registers the refused page once, not once per second", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 3 });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 4);
+    });
+
+    expect(recordDirtyPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers nothing while the counter is draining normally", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 0 });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 4);
+    });
+
+    expect(recordDirtyPage).not.toHaveBeenCalled();
   });
 
   it("unsubscribes when the editor unmounts", async () => {

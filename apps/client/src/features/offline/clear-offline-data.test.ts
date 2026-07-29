@@ -145,6 +145,7 @@ describe("clearOfflineData", () => {
   let clearPageSyncMarkers: Mock<() => Promise<void>>;
   let clearDirtyPages: Mock<() => Promise<void>>;
   let clearPageSyncMarkersExcept: Mock<(keep: readonly string[]) => Promise<void>>;
+  let forgetOwnerHint: Mock<() => void>;
 
   beforeEach(() => {
     deletePersistedQueryCache = vi.fn<() => Promise<void>>(async () => {});
@@ -154,6 +155,7 @@ describe("clearOfflineData", () => {
     clearPageSyncMarkersExcept = vi.fn<(keep: readonly string[]) => Promise<void>>(
       async () => {},
     );
+    forgetOwnerHint = vi.fn<() => void>();
   });
 
   afterEach(() => {
@@ -167,6 +169,7 @@ describe("clearOfflineData", () => {
       clearPageSyncMarkers,
       clearDirtyPages,
       clearPageSyncMarkersExcept,
+      forgetOwnerHint,
       ...overrides,
     });
 
@@ -312,6 +315,28 @@ describe("clearOfflineData", () => {
     expect(deleted).toEqual(["docmost-offline-files-v1"]);
     expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
     expect(queryClient.clear).toHaveBeenCalledOnce();
+  });
+
+  it("forgets the owner hint, so a shared machine keeps no stable identifier", async () => {
+    await run({ indexedDB: null, caches: null });
+
+    expect(forgetOwnerHint).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the owner hint when it is preserving data that needs it", async () => {
+    // Session expiry re-reads the hint on the *next* 401 and stamps the store
+    // from it; dropping it here would make the preserved data unattributable
+    // and therefore erasable.
+    const { factory } = fakeIndexedDB({ databases: ["page.keep"] });
+
+    await run({
+      indexedDB: factory,
+      caches: null,
+      preservePageIds: ["keep"],
+      preserveDirtyPages: true,
+    });
+
+    expect(forgetOwnerHint).not.toHaveBeenCalled();
   });
 
   it("clears the phase-3 dirty-page registry and its blocked list", async () => {

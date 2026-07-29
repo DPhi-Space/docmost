@@ -50,6 +50,7 @@ import { useOfflineEditingEnabled } from "./offline-editing-settings";
 import { hasPageRemoteSynced, markPageRemoteSynced } from "./sync-markers";
 import { clearDirtyPage, recordDirtyPage } from "./dirty-pages";
 import { hasDocContent, type ContentBearingDoc } from "./doc-content";
+import { useOfflineDataIsOurs } from "./data-ownership";
 import { resolveDirtyPageLink } from "./dirty-page-link";
 import { trackDirtyEdits, type DocUpdateSource } from "./dirty-tracking";
 import { claimOpenPage, releaseOpenPage } from "./open-page-registry";
@@ -84,6 +85,17 @@ export interface OfflineEditGateInput {
    * claiming the user's changes were saved locally.
    */
   hasLocalContent: boolean;
+  /**
+   * The offline data on this disk is provably the signed-in user's
+   * (`data-ownership.ts`).
+   *
+   * Defaults to false and stays false until reconciliation proves otherwise, so
+   * a browser holding a previous user's preserved documents cannot open one in
+   * a live editor while the cleanup is still deciding. A cleanup hook that
+   * *must* run is exactly what failed three ways in the audit; this term is the
+   * reader refusing on its own account.
+   */
+  offlineDataIsOurs: boolean;
   isOnline: boolean;
 }
 
@@ -97,6 +109,7 @@ export function canEditWithoutConnection(input: OfflineEditGateInput): boolean {
     input.isLocalSynced &&
     input.hasSyncedBefore &&
     input.hasLocalContent &&
+    input.offlineDataIsOurs &&
     !input.isOnline
   );
 }
@@ -180,6 +193,7 @@ export function useOfflineEditGate({
 }: UseOfflineEditGateInput): OfflineEditGate {
   const featureEnabled = useOfflineEditingEnabled();
   const isOnline = useOnlineStatus();
+  const offlineDataIsOurs = useOfflineDataIsOurs();
 
   /**
    * Held as "which page is known synced" rather than as a boolean, for the same
@@ -215,6 +229,7 @@ export function useOfflineEditGate({
     isLocalSynced,
     hasSyncedBefore,
     hasLocalContent: populatedPageId === pageId,
+    offlineDataIsOurs,
     isOnline,
   });
 
@@ -351,6 +366,7 @@ export function useOfflineEditGate({
           void markPageRemoteSynced(pageId);
         }
       }
+      const wasWarned = stateRef.current.warned;
       stateRef.current = nextUnsyncedState(
         stateRef.current,
         {
@@ -361,6 +377,33 @@ export function useOfflineEditGate({
         UNSYNCED_GRACE_MS,
       );
       setUnsyncedChangesWarning(stateRef.current.warned);
+
+      /**
+       * Register the page the moment the server is shown to be refusing its
+       * writes.
+       *
+       * `dirty-tracking.ts` only records edits made while the provider is
+       * *disconnected*, but this is the other shape of unpushed work: a live,
+       * synced connection the server answers with `SyncStatus(false)`. Those
+       * edits were never in the registry, so a later session expiry would not
+       * know to preserve them — and would delete exactly the edits the banner
+       * above them promises are safe on this device.
+       */
+      if (!wasWarned && stateRef.current.warned) {
+        maybeDirtyRef.current = true;
+        void recordDirtyPage(pageId, resolveDirtyPageLink(pageId)).then(
+          (recorded) => {
+            if (!recorded) {
+              // Not swallowed: the user is being told their edits are safe
+              // here, and this is the one place that can know the index of
+              // them was not written.
+              console.warn(
+                `[docmost] offline: could not register unsaved changes for page ${pageId}`,
+              );
+            }
+          },
+        );
+      }
     };
 
     tick();

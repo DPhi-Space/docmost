@@ -25,33 +25,57 @@
  * stake; this is a deliberate, narrow reversal of #18's stated behaviour on one
  * of its two paths, and nothing else.
  *
- * What the 401 path keeps is exactly what is needed to recover the work:
+ * ## Preservation requires a provable owner — no exceptions
+ *
+ * The first version of this module preserved first and established ownership
+ * later, from a localStorage note that a cleanup hook consulted. An audit
+ * reached the next user's session three separate ways through that gap. So the
+ * rule is now the other way round:
+ *
+ * > **Nothing is preserved unless this browser can say, in the same IndexedDB
+ * > store as the data, whose it is.**
+ *
+ * No owner known, or the stamp unwritable? Then this is the logout path: erase
+ * everything, including the unsynced edits. That loses work in a case that
+ * should not arise — the owner is recorded on every authenticated boot,
+ * unconditionally — and losing work is the lesser failure against handing it to
+ * a stranger. `data-ownership.ts` carries the rest of the reasoning and the
+ * reader-side refusals that back it up.
+ *
+ * What preservation keeps is exactly what is needed to recover the work:
  * - the `page.<pageId>` database of every page the dirty registry lists;
  * - the sync markers for those same pages, and no others (a marker whose
- *   document has been deleted is the lie `offline-edit-gate.ts` now refuses to
- *   act on);
- * - the registry itself, which is the index of the above.
+ *   document has been deleted is the lie `offline-edit-gate.ts` refuses to act
+ *   on);
+ * - the registry itself, stamped with its owner.
  *
  * Everything else still goes: the dehydrated query cache, the runtime caches
  * (attachments included), every other page's database, every other marker. With
  * nothing pending, the 401 path is byte-for-byte the logout path.
- *
- * ## And it is not kept silently
- *
- * The preserved state is announced twice. A notice is written to localStorage
- * and rendered on the login page the user is about to land on
- * (`unsynced-recovery-notice.tsx`), and on the next sign-in the resync manager
- * pushes the edits by itself. If a **different** account signs in on this
- * browser, `reconcilePendingRecovery` erases the preserved data before that
- * user can see any of it — which is the shared-machine case #18 cared about,
- * handled at the moment it can actually be identified.
  */
 
 import { clearOfflineData, type ClearOfflineDataDeps } from "./clear-offline-data";
-import { listDirtyPages, type DirtyPageRecord } from "./dirty-pages";
+import {
+  readDirtyPages,
+  setOfflineDataOwner,
+  type DirtyPagesRead,
+} from "./dirty-pages";
+import {
+  defaultOwnerStorage,
+  forgetOfflineDataOwner,
+  readOfflineDataOwnerHint,
+  type StorageLike,
+} from "./owner-hint";
+
+export {
+  OFFLINE_DATA_OWNER_KEY,
+  forgetOfflineDataOwner,
+  readOfflineDataOwnerHint,
+  rememberOfflineDataOwner,
+} from "./owner-hint";
+export type { StorageLike } from "./owner-hint";
 
 export const PENDING_RECOVERY_KEY = "docmost.offline.pending-recovery";
-export const OFFLINE_DATA_OWNER_KEY = "docmost.offline.owner";
 
 export interface PendingRecoveryPage {
   pageId: string;
@@ -60,57 +84,11 @@ export interface PendingRecoveryPage {
 
 export interface PendingRecoveryNotice {
   at: number;
-  /**
-   * Who the preserved documents belong to, if it was recorded. `null` means
-   * unknown, which is read as "the same user" — see `reconcilePendingRecovery`.
-   */
-  ownerUserId: string | null;
+  ownerUserId: string;
   pages: PendingRecoveryPage[];
 }
 
-/** The slice of `Storage` this module uses; injected in tests. */
-export interface StorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
-
-function defaultStorage(): StorageLike | null {
-  try {
-    return globalThis.localStorage ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Remember which account the on-disk offline data belongs to.
- *
- * Written from the authenticated shell (`use-offline-resync.ts`), because the
- * 401 handler runs outside React and has no way to ask. localStorage rather
- * than the query cache: the 401 path erases the query cache, and this has to
- * outlive it.
- */
-export function rememberOfflineDataOwner(
-  userId: string | null | undefined,
-  storage: StorageLike | null = defaultStorage(),
-): void {
-  try {
-    if (userId) storage?.setItem(OFFLINE_DATA_OWNER_KEY, userId);
-  } catch {
-    // An unknown owner is handled; a failed write is not worth reporting.
-  }
-}
-
-export function readOfflineDataOwner(
-  storage: StorageLike | null = defaultStorage(),
-): string | null {
-  try {
-    return storage?.getItem(OFFLINE_DATA_OWNER_KEY) ?? null;
-  } catch {
-    return null;
-  }
-}
+const defaultStorage = defaultOwnerStorage;
 
 export function readPendingRecovery(
   storage: StorageLike | null = defaultStorage(),
@@ -145,12 +123,16 @@ function writePendingRecovery(
   try {
     storage?.setItem(PENDING_RECOVERY_KEY, JSON.stringify(notice));
   } catch {
-    // The data is still preserved; only the announcement is lost.
+    // The data is still preserved and still stamped; only the announcement is
+    // lost. **Nothing downstream keys off this note** — that was the third of
+    // the three leaks, where consuming the note was mistaken for settling the
+    // data. See `data-ownership.ts`.
   }
 }
 
 export interface SessionExpiryDeps {
-  listDirtyPages?: () => Promise<DirtyPageRecord[]>;
+  readDirtyPages?: () => Promise<DirtyPagesRead>;
+  setOfflineDataOwner?: (ownerUserId: string) => Promise<boolean>;
   clearOfflineData?: (deps?: ClearOfflineDataDeps) => Promise<void>;
   storage?: StorageLike | null;
   now?: () => number;
@@ -167,80 +149,71 @@ export async function clearOfflineDataOnSessionExpiry(
   deps: SessionExpiryDeps = {},
 ): Promise<void> {
   const {
-    listDirtyPages: list = listDirtyPages,
+    readDirtyPages: read = readDirtyPages,
+    setOfflineDataOwner: stampOwner = setOfflineDataOwner,
     clearOfflineData: clear = clearOfflineData,
     storage = defaultStorage(),
     now = Date.now,
   } = deps;
 
-  let pending: DirtyPageRecord[] = [];
-  try {
-    pending = await list();
-  } catch {
-    pending = [];
-  }
-
-  if (pending.length === 0) {
-    // Nothing on this device that the server does not already have. There is
-    // no work to protect, so the privacy answer wins outright and this is the
-    // logout path exactly.
+  const eraseEverything = async () => {
     clearPendingRecovery(storage);
+    forgetOfflineDataOwner(storage);
     await clear();
+  };
+
+  // Ownership first, before anything is inspected: without it there is no
+  // preservation to consider, whatever the registry says.
+  const ownerUserId = readOfflineDataOwnerHint(storage);
+  if (!ownerUserId) {
+    await eraseEverything();
     return;
   }
 
-  const preservePageIds = pending.map((record) => record.pageId);
-  await clear({ preservePageIds, preserveDirtyPages: true });
+  let pending: DirtyPagesRead;
+  try {
+    pending = await read();
+  } catch {
+    pending = { readable: false };
+  }
+
+  if (pending.readable && pending.records.length === 0) {
+    // Nothing on this device that the server does not already have. There is
+    // no work to protect, so the privacy answer wins outright and this is the
+    // logout path exactly.
+    await eraseEverything();
+    return;
+  }
+
+  // An unreadable registry is **not** "nothing is pending" — it is "I cannot
+  // tell what is pending", and deleting every document on that basis is how the
+  // original defect destroyed work. Keep them all; the owner stamp and the
+  // reconcile on next sign-in still keep them out of anyone else's session.
+  const preserveAllPages = !pending.readable;
+  const records = pending.readable ? pending.records : [];
+
+  // Stamped *before* anything is erased, so a browser that dies mid-cleanup is
+  // left holding data that is attributable rather than anonymous.
+  if (!(await stampOwner(ownerUserId))) {
+    await eraseEverything();
+    return;
+  }
+
+  await clear({
+    preservePageIds: records.map((record) => record.pageId),
+    preserveAllPages,
+    preserveDirtyPages: true,
+  });
 
   writePendingRecovery(
     {
       at: now(),
-      ownerUserId: readOfflineDataOwner(storage),
-      pages: pending.map((record) => ({
+      ownerUserId,
+      pages: records.map((record) => ({
         pageId: record.pageId,
         title: record.link?.title,
       })),
     },
     storage,
   );
-}
-
-export interface ReconcileDeps {
-  clearOfflineData?: (deps?: ClearOfflineDataDeps) => Promise<void>;
-  storage?: StorageLike | null;
-}
-
-/**
- * Settle a pending recovery once somebody signs back in.
- *
- * Two outcomes, and the interesting one is the second:
- *
- * - **Same user** (or an owner that was never recorded): drop the notice and
- *   leave the data alone. The resync manager finds the registry on boot and
- *   pushes the edits with no further ceremony. An unrecorded owner is read as
- *   "same user" on purpose — the alternative is destroying work on a guess,
- *   which is the defect this whole module exists to undo.
- * - **Different user**: erase everything, now, before the new user can open any
- *   of it. This is #18's shared-machine case, and deferring it to here is
- *   strictly better than acting at 401 time: at 401 nobody knows yet whether
- *   the machine changed hands, and here it is a fact.
- */
-export async function reconcilePendingRecovery(
-  currentUserId: string | null | undefined,
-  deps: ReconcileDeps = {},
-): Promise<"kept" | "discarded" | "none"> {
-  const { clearOfflineData: clear = clearOfflineData, storage = defaultStorage() } =
-    deps;
-
-  const notice = readPendingRecovery(storage);
-  if (!notice) return "none";
-
-  if (notice.ownerUserId && currentUserId && notice.ownerUserId !== currentUserId) {
-    clearPendingRecovery(storage);
-    await clear();
-    return "discarded";
-  }
-
-  clearPendingRecovery(storage);
-  return "kept";
 }

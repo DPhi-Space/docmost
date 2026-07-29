@@ -44,6 +44,10 @@ vi.mock("@/features/auth/services/auth-service", () => ({
 }));
 
 import { clearOfflineData } from "./clear-offline-data";
+import {
+  reconcileOfflineDataOwnership,
+  resetOwnershipForTests,
+} from "./data-ownership";
 import { createDefaultResyncDeps } from "./resync-manager";
 import { setResyncState } from "./resync-state";
 import {
@@ -67,6 +71,7 @@ function setOnline(online: boolean) {
 describe("createDefaultResyncDeps — the manager's real dependencies", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetOwnershipForTests();
     resetOpenPageForTests();
     localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
     setOnline(true);
@@ -80,6 +85,21 @@ describe("createDefaultResyncDeps — the manager's real dependencies", () => {
     expect(deps.isEnabled()).toBe(false);
     setOfflineEditingEnabled(true);
     expect(deps.isEnabled()).toBe(true);
+  });
+
+  it("reads the real ownership verdict, rather than assuming the data is ours", async () => {
+    // Wiring this to `() => true` would let the loop push a previous user's
+    // preserved document to the server under the current user's identity.
+    const deps = createDefaultResyncDeps();
+
+    expect(deps.offlineDataIsOurs()).toBe(false);
+
+    await reconcileOfflineDataOwnership("user-1", {
+      readOfflineDataOwner: async () => ({ status: "none" }),
+      clearOfflineData: async () => {},
+    });
+
+    expect(deps.offlineDataIsOurs()).toBe(true);
   });
 
   it("reads the browser's connectivity, rather than assuming it is online", () => {

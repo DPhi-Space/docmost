@@ -197,11 +197,42 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   exactly what is needed to recover the work — the `page.*` database of every page the dirty
   registry lists, the sync markers for **those pages only** (a marker without its document is
   the state the gate now refuses to trust), and the registry itself — and erases everything
-  else. With nothing pending it is byte-for-byte the logout path. The preservation is announced:
-  a notice is written for the login page (`unsynced-recovery-notice.tsx`), the resync manager
-  pushes the edits on the next sign-in, and `reconcilePendingRecovery` erases the lot if a
-  **different** account signs in on this browser — which is #18's shared-machine case, decided
-  at the moment it is actually knowable rather than guessed at 401 time.
+  else. With nothing pending it is byte-for-byte the logout path.
+- **Preserved data must be provably owned, and the readers enforce it themselves**
+  (`data-ownership.ts`). The first version of the 401 fix preserved first and settled ownership
+  later, from a localStorage note that one cleanup hook consulted — and an audit reached the
+  *next user's session* through it three ways: an unrecorded owner read as "same user"; the hook
+  gated on the offline-editing switch, so declining the feature declined the privacy cleanup;
+  and the hook consuming its notice on the first sign-in while leaving the data, so the second
+  sign-in found no notice and checked nothing. Every one ended with the previous user's text on
+  screen **and pushed to the server under the new user's identity**. Four rules now hold, and
+  they are deliberately redundant because three failures of one hook is a diagnosis:
+  1. **Nothing is preserved without a provable owner.** No owner hint, or the IndexedDB stamp
+     cannot be written ⇒ this is the logout path, work included. Losing work in a case that
+     should not arise beats handing it to a stranger.
+  2. **The owner lives beside the data**, under a reserved key *in the dirty-page store*, not in
+     localStorage. localStorage carries only a hint, because the axios 401 handler has no async
+     boundary to read IndexedDB on; it is never what a reader trusts.
+  3. **Reconciliation is triggered by the presence of the data**, never by a notice, and runs
+     **unconditionally on sign-in** — `useOfflineDataOwnership()` takes no `enabled` argument, so
+     there is nowhere for the switch to be consulted. Mismatch *or* unreadable ⇒ erase.
+  4. **The readers refuse on their own account.** `offlineDataIsOurs()` starts false; the editing
+     gate and the resync manager both require it. A missed cleanup degrades to "data sits inert
+     on disk" instead of "data appears in someone else's session".
+  What this does **not** cover, stated plainly: `page-editor.tsx` binds `IndexeddbPersistence`
+  for every page it opens, and that is collaboration code the fork does not touch — so a foreign
+  document still on disk when a page is opened would merge. Rules 1 and 3 are what stop such a
+  document existing; rule 4 is defence in depth for the window in between.
+  The preservation is announced: a notice is written for the login page
+  (`unsynced-recovery-notice.tsx`) and the resync manager pushes the edits on the next sign-in.
+  The notice is an announcement only — **never a trigger for anything**, which is what leak (3)
+  was.
+- **Preservation follows what the user was promised.** `dirty-tracking.ts` records edits made
+  while the provider is *disconnected*, but the phase-2 "your changes could not be saved to the
+  server" banner appears on a *connected* session whose writes the server refuses. Those edits
+  are registered too, from the same tick that raises the banner, so the preservation set matches
+  the promise. And an **unreadable registry preserves everything** rather than reading as
+  "nothing is pending" — that reading is precisely how the original defect destroyed work.
 - **`clearOfflineData()` itself** stops persistence *first* so a throttled write cannot restore
   what it erases, then drops the dehydrated cache, every `page.*` y-indexeddb database (a
   pre-existing leak that predates this work) and the SW runtime caches. Two deliberate

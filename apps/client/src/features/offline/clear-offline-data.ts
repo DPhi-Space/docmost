@@ -52,6 +52,7 @@ import {
   clearPageSyncMarkersExcept,
 } from "./sync-markers";
 import { clearDirtyPages } from "./dirty-pages";
+import { forgetOfflineDataOwner } from "./owner-hint";
 
 /** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
 const PAGE_DB_PREFIX = "page.";
@@ -94,11 +95,27 @@ export interface ClearOfflineDataDeps {
    */
   preservePageIds?: readonly string[];
   /**
-   * Keep the dirty registry. Meaningless without `preservePageIds` — the
+   * Keep **every** `page.*` database and every marker.
+   *
+   * The one case: session expiry could not read the dirty registry, so it
+   * cannot say which documents hold unpushed work. "I cannot tell" must not
+   * resolve to "delete them all" — that is the original defect. The data stays,
+   * stamped with its owner, and `data-ownership.ts` keeps it out of anyone
+   * else's session.
+   */
+  preserveAllPages?: boolean;
+  /**
+   * Keep the dirty registry. Meaningless without something to index — the
    * registry is the index of the documents being preserved, and an index
    * without its documents is worse than neither.
    */
   preserveDirtyPages?: boolean;
+  /**
+   * Also drop the localStorage owner hint. On by default, because every exit
+   * this function serves ends the session; session expiry re-writes it after
+   * the fact when it preserves.
+   */
+  forgetOwnerHint?: () => void;
 }
 
 /**
@@ -169,12 +186,20 @@ export async function clearOfflineData(
     clearDirtyPages: clearDirty = clearDirtyPages,
     deleteTimeoutMs = DEFAULT_DELETE_TIMEOUT_MS,
     preservePageIds = [],
+    preserveAllPages = false,
     preserveDirtyPages = false,
+    forgetOwnerHint = forgetOfflineDataOwner,
   } = deps;
+
+  const preservingSomething = preserveAllPages || preservePageIds.length > 0;
 
   // First, before anything else: make the persister refuse further writes, so a
   // throttled write already in flight cannot restore what we are about to erase.
   stopPersisting();
+
+  // The owner hint is a stable user identifier and belongs to the session that
+  // is ending. Session expiry re-writes it afterwards for the data it keeps.
+  if (!preservingSomething) forgetOwnerHint();
 
   // Read the page database names while the cache is still populated — the
   // fallback path derives them from it.
@@ -187,18 +212,22 @@ export async function clearOfflineData(
     // A marker for a page whose document has just been deleted is precisely the
     // "marker without content" state the gate refuses to trust, so the two are
     // narrowed together or not at all.
-    preservePageIds.length > 0
-      ? clearMarkersExcept(preservePageIds)
-      : clearMarkers(),
-    preserveDirtyPages && preservePageIds.length > 0
+    preserveAllPages
+      ? Promise.resolve()
+      : preservePageIds.length > 0
+        ? clearMarkersExcept(preservePageIds)
+        : clearMarkers(),
+    preserveDirtyPages && preservingSomething
       ? Promise.resolve()
       : clearDirty(),
-    deletePageDatabases(
-      idb,
-      fallbackNames,
-      deleteTimeoutMs,
-      preservePageIds.map((id) => `${PAGE_DB_PREFIX}${id}`),
-    ),
+    preserveAllPages
+      ? Promise.resolve()
+      : deletePageDatabases(
+          idb,
+          fallbackNames,
+          deleteTimeoutMs,
+          preservePageIds.map((id) => `${PAGE_DB_PREFIX}${id}`),
+        ),
     deleteRuntimeCaches(cacheStorage),
   ]);
 

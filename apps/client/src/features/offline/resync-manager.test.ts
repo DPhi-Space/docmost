@@ -61,6 +61,7 @@ function harness(
     withLock: async (_name, run) => run(),
     isEnabled: () => true,
     isOnline: () => true,
+    offlineDataIsOurs: () => true,
     now: () => 1_000,
     publish: (next) => void published.push(next as Record<string, unknown>),
     setTimer: (fn, ms) => timers.push({ fn, ms }),
@@ -191,6 +192,40 @@ describe("runResyncPass", () => {
     const onTimer = harness([blocked]);
     await runResyncPass("periodic", onTimer.deps);
     expect(onTimer.attempted).toEqual([]);
+  });
+
+  it("refuses to push anything the browser cannot prove is ours", async () => {
+    // The worst half of the cross-account leak: pushing a previous user's
+    // preserved document puts their words on the server under the current
+    // user's identity, and the audit trail attributes them to the wrong person.
+    const h = harness([record("a")], {}, { offlineDataIsOurs: () => false });
+
+    const summary = await runResyncPass("online", h.deps);
+
+    expect(h.attempted).toEqual([]);
+    expect(h.published).toEqual([]);
+    expect(summary.attempted).toBe(0);
+  });
+
+  it("refuses before it even consults the switch or the network", async () => {
+    // Ownership is the first gate, so a browser holding foreign data cannot
+    // reach the registry however the other conditions happen to be set.
+    const reads: string[] = [];
+    const h = harness([record("a")], {}, {
+      offlineDataIsOurs: () => false,
+      isEnabled: () => {
+        reads.push("enabled");
+        return true;
+      },
+      isOnline: () => {
+        reads.push("online");
+        return true;
+      },
+    });
+
+    await runResyncPass("online", h.deps);
+
+    expect(reads).toEqual([]);
   });
 
   it("does nothing at all while the offline-editing switch is off", async () => {

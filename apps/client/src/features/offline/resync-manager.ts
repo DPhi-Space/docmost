@@ -53,6 +53,7 @@ import {
   selectPagesToResync,
 } from "./dirty-pages";
 import { isOfflineEditingEnabled } from "./offline-editing-settings";
+import { offlineDataIsOurs } from "./data-ownership";
 import { getOpenPage } from "./open-page-registry";
 import { openResyncSession } from "./resync-session";
 import {
@@ -110,6 +111,8 @@ export interface ResyncManagerDeps {
   withLock: <T>(name: string, run: () => Promise<T>) => Promise<T | undefined>;
   isEnabled: () => boolean;
   isOnline: () => boolean;
+  /** The offline data on this disk is provably the signed-in user's. */
+  offlineDataIsOurs: () => boolean;
   now: () => number;
   publish: typeof setResyncState;
   /** Injected so a test can drive the schedule without real timers. */
@@ -144,6 +147,11 @@ export async function runResyncPass(
     skipped: false,
   };
 
+  // Ownership before anything else. Pushing a document this browser cannot
+  // prove belongs to the signed-in user would put the previous user's words on
+  // the server under the current user's identity — the worst half of the leak
+  // this guards. `false` until reconciliation says otherwise.
+  if (!deps.offlineDataIsOurs()) return empty;
   if (!deps.isEnabled() || !deps.isOnline()) return empty;
 
   const result = await deps.withLock(RESYNC_LOCK_NAME, async () => {
@@ -399,6 +407,7 @@ export function createDefaultResyncDeps(): ResyncManagerDeps {
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
     isOnline: () => globalThis.navigator?.onLine !== false,
+    offlineDataIsOurs,
     now: () => Date.now(),
     publish: setResyncState,
     setTimer: (fn, ms) => globalThis.setTimeout(fn, ms) as unknown as number,

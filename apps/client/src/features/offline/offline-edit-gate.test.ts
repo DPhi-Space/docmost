@@ -7,16 +7,18 @@ import {
 /**
  * The safety invariant, enumerated rather than sampled.
  *
- * Every one of the thirty-two combinations is generated, because the property
- * that matters is not "the happy path works" — it is that *thirty-one* of them
- * refuse. Two rows carry the weight:
+ * Every one of the sixty-four combinations is generated, because the property
+ * that matters is not "the happy path works" — it is that *sixty-three* of them
+ * refuse. Three rows carry the weight:
  *
  * - `hasSyncedBefore: false` — a document that has never completed a real
  *   remote sync is never editable, which is what keeps this out of the class of
  *   upstream's data-loss regression (docmost#2353);
  * - `hasLocalContent: false` — a marker whose `page.<pageId>` database has gone
  *   missing must not open a live, blank editor claiming the user's changes are
- *   saved locally.
+ *   saved locally;
+ * - `offlineDataIsOurs: false` — a browser holding a *previous* user's preserved
+ *   documents must not open one in a live editor for whoever signed in next.
  *
  * There is deliberately no "agrees with its specification" case restating the
  * boolean expression: a test that re-implements the implementation cannot fail
@@ -30,14 +32,16 @@ function everyCombination(): OfflineEditGateInput[] {
     for (const isLocalSynced of ALL)
       for (const hasSyncedBefore of ALL)
         for (const hasLocalContent of ALL)
-          for (const isOnline of ALL)
-            rows.push({
-              featureEnabled,
-              isLocalSynced,
-              hasSyncedBefore,
-              hasLocalContent,
-              isOnline,
-            });
+          for (const offlineDataIsOurs of ALL)
+            for (const isOnline of ALL)
+              rows.push({
+                featureEnabled,
+                isLocalSynced,
+                hasSyncedBefore,
+                hasLocalContent,
+                offlineDataIsOurs,
+                isOnline,
+              });
   return rows;
 }
 
@@ -46,12 +50,13 @@ const PERMITTED: OfflineEditGateInput = {
   isLocalSynced: true,
   hasSyncedBefore: true,
   hasLocalContent: true,
+  offlineDataIsOurs: true,
   isOnline: false,
 };
 
 describe("canEditWithoutConnection", () => {
-  it("enumerates thirty-two combinations", () => {
-    expect(everyCombination()).toHaveLength(32);
+  it("enumerates sixty-four combinations", () => {
+    expect(everyCombination()).toHaveLength(64);
   });
 
   it("permits exactly one of them", () => {
@@ -65,6 +70,10 @@ describe("canEditWithoutConnection", () => {
     ["y-indexeddb has not loaded the document yet", { isLocalSynced: false }],
     ["the page has never completed a real remote sync", { hasSyncedBefore: false }],
     ["the local document is an empty shell", { hasLocalContent: false }],
+    [
+      "the offline data on this disk is not provably the signed-in user's",
+      { offlineDataIsOurs: false },
+    ],
     ["the browser believes it is online", { isOnline: true }],
   ])("refuses when %s, with everything else in its favour", (_why, override) => {
     expect(canEditWithoutConnection({ ...PERMITTED, ...override })).toBe(false);
@@ -77,6 +86,7 @@ describe("canEditWithoutConnection", () => {
         isLocalSynced: false,
         hasSyncedBefore: false,
         hasLocalContent: false,
+        offlineDataIsOurs: false,
         isOnline: true,
       }),
     ).toBe(false);

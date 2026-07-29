@@ -307,13 +307,27 @@ describe("openResyncSession — failed construction", () => {
 
 describe("realSessionDeps", () => {
   it("is the default, so the production path is the one described above", async () => {
-    // The only assertion that touches the real wiring: with no IndexedDB in
-    // jsdom, construction fails — which proves the default bundle is reached.
-    const spy = vi.spyOn(realSessionDeps, "createPersistence");
+    // The persistence is *replaced*, not merely observed. Letting the real one
+    // run reaches `new IndexeddbPersistence` in jsdom, which has no IndexedDB:
+    // y-indexeddb then rejects from inside its own promise chain, and vitest
+    // reports an unhandled error and **exits 1 with every test passing**. A red
+    // build that says "413 passed" is worse than a missing test.
+    const spy = vi
+      .spyOn(realSessionDeps, "createPersistence")
+      .mockImplementation(() => {
+        throw new Error("stubbed: no IndexedDB in jsdom");
+      });
 
-    await expect(openResyncSession("p1", "tok")).rejects.toThrow();
+    await expect(openResyncSession("p1", "tok")).rejects.toThrow("stubbed");
 
     expect(spy).toHaveBeenCalledWith("page.p1", expect.anything());
     spy.mockRestore();
+  });
+
+  it("names its document the same way the standalone helper does", () => {
+    // The rest of the default bundle cannot be constructed under jsdom at all,
+    // so what is pinned here is the part that can be: the naming both the
+    // provider and the y-indexeddb database key off.
+    expect(pageDocumentName("p1")).toBe("page.p1");
   });
 });
