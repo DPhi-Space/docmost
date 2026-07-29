@@ -40,6 +40,10 @@ On top of the `v0.95.0` base:
 - `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
   behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
   `updatePreference` branch.
+- `feat: native personal spaces` — the two endpoints the shipped client already calls
+  (`core/personal-space`), letting a MEMBER own exactly one space (see **Personal spaces** below).
+  Unlocks `Feature.PERSONAL_SPACES` in `FORK_ENABLED_FEATURES`. No client changes, no schema
+  changes, no permission-model changes.
 - other commits not mentioned here
 
 None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
@@ -142,6 +146,57 @@ that point our own vim code outweighs the glue.
 - `vim-prosemirror` publishes ESM with extensionless relative imports, which Node's resolver
   rejects. Vite backfills the extension; **vitest needs `server.deps.inline`** (see
   `apps/client/vitest.config.ts`).
+
+## Personal spaces (`core/personal-space`)
+
+Lets a workspace MEMBER own exactly one space of their own. The **only** thing this adds is a
+second way to create a space; everything after creation is an ordinary space.
+
+**Almost all of it already shipped natively in the `v0.95.0` base** — the schema
+(`spaces.is_personal` + the `spaces_personal_creator_unique` partial index),
+`SpaceRepo.findPersonalSpace`, `SpaceService.createSpace`'s `{ isPersonal }` option, the audit
+entry, the workspace toggle (`settings.spaces.allowPersonal`, licence-gated on
+`Feature.PERSONAL_SPACES` in `workspace.service.ts`) and the **entire client**
+(`apps/client/src/ee/personal-space/*`; the client `ee/` dir is in-repo, only `apps/server/src/ee`
+is the unfetchable submodule). Only the two endpoints the client calls — `POST
+/personal-space/info` and `POST /personal-space/create` — were EE-only. This module is those two
+endpoints and nothing else; there are **no client, schema or permission-model changes**.
+
+**Why a separate endpoint at all.** `spaces/create` requires the workspace-level
+`Manage`/`Space` ability, which MEMBERs do not have (`workspace-ability.factory.ts`), so a member
+can otherwise never own a space. `personal-space/create` deliberately does not perform that check
+— the admin toggle plus the one-per-creator unique index are what replace it. That is the whole
+feature, and it is why the create path lives in its own controller rather than as a flag on
+`spaces/create`.
+
+**Licensing is checked once, on the toggle write**, matching the MCP module: an unlicensed
+workspace can never switch `allowPersonal` on, so the endpoint checks only the toggle. `info` is
+deliberately *not* toggle-gated — turning the toggle off stops new personal spaces, it does not
+hide the one a user already owns (which is what the client's top menu expects).
+
+**The slug is generated, never accepted from the client** (the modal has no slug field).
+`slugBase()` folds accents, drops apostrophes and collapses the rest to hyphens, then up to four
+retries append a short nanoid suffix — personal-space names collide by nature (two Sams in one
+workspace). Its output is asserted against `CreateSpaceDto`'s slug regex by test, since nothing
+else validates a server-generated slug.
+
+### Deliberate non-changes (behaviour you should know about before enabling it)
+
+These are all pre-existing Docmost semantics, kept as-is on purpose:
+
+- **Workspace owners/admins cannot see a personal space.** `SpaceAbilityFactory` resolves roles
+  purely from `space_members` and has no owner override; `WorkspaceCaslSubject.Space` is checked
+  in exactly one place in the server (`space.controller.ts`, `spaces/create`). So an owner cannot
+  read, list, export or delete another user's personal space, and cannot add themselves to it.
+  This is already true of any space an admin isn't a member of — personal spaces just make that
+  set large. Creation is still audited (`SPACE_CREATED` with `isPersonal: true`).
+- **"Personal" is not enforced after creation.** The creator is space ADMIN, so they can rename
+  it, add members/groups, or public-share pages from it (still subject to `disablePublicSharing`).
+  Nothing re-reads `is_personal`.
+- **Deleting a user orphans their personal space.** `workspace.service.deleteUser` removes the
+  user's `space_members` rows but never touches `spaces`, so the space survives with zero members:
+  unreachable by everyone and undeletable through any route. Pre-existing for any space, but
+  personal spaces make it routine — fix it deliberately, not as a side effect of this feature.
 
 ## Adopting a newer upstream release
 
