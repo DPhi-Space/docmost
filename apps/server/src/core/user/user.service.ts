@@ -69,6 +69,14 @@ export class UserService {
       );
     }
 
+    if (typeof updateUserDto.vimMode !== 'undefined') {
+      return this.userRepo.updatePreference(
+        userId,
+        'vimMode',
+        updateUserDto.vimMode,
+      );
+    }
+
     const notificationSettings: Record<string, NotificationSettingKey> = {
       notificationPageUpdates: 'page.updated',
       notificationPageUserMention: 'page.userMention',

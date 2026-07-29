@@ -92,6 +92,11 @@ import {
   getCollabSocket,
   releaseCollabSocket,
 } from "@/features/editor/collab-socket";
+import {
+  isVimSupportedDevice,
+  setVimModeEnabled,
+} from "@/features/editor/extensions/vim-mode";
+import VimStatusIndicator from "@/features/editor/components/vim/vim-status-indicator";
 
 interface PageEditorProps {
   pageId: string;
@@ -417,6 +422,17 @@ function CollabPageEditor({
     },
   });
 
+  // Vim is registered in mainExtensions but inert until an editor opts in, so
+  // toggling the preference never rebuilds the extension array (which would
+  // recreate the collaborative editor).
+  const vimModeEnabled =
+    (currentUser?.user?.settings?.preferences?.vimMode ?? false) &&
+    isVimSupportedDevice();
+
+  useEffect(() => {
+    setVimModeEnabled(editor, vimModeEnabled && editorIsEditable);
+  }, [editor, vimModeEnabled, editorIsEditable]);
+
   const handleActiveCommentEvent = (event) => {
     const { commentId, resolved } = event.detail;
 
@@ -511,6 +527,10 @@ function CollabPageEditor({
           <SearchAndReplaceDialog editor={editor} editable={editable} />
         )}
         {editor && <SearchNavigationDialog editor={editor} />}
+
+        {editor && editorIsEditable && vimModeEnabled && (
+          <VimStatusIndicator editor={editor} />
+        )}
 
         {editor && editorIsEditable && (
           <div>

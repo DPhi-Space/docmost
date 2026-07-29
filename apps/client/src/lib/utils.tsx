@@ -103,6 +103,8 @@ export const normalizeUrl = (url: string): string => {
 
 const _isApple = /mac|iphone|ipad|ipod/i.test(navigator.platform ?? "");
 
+export const isApplePlatform = _isApple;
+
 /// Cmd key on Apple devices, Ctrl key everywhere else
 export function platformModifierKey(event: KeyboardEvent): boolean {
   return _isApple ? event.metaKey : event.ctrlKey;

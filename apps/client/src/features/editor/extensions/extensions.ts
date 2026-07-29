@@ -131,6 +131,7 @@ import { countWords } from "alfaaz";
 import AutoJoiner from "@/features/editor/extensions/autojoiner.ts";
 import GlobalDragHandle from "@/features/editor/extensions/drag-handle.ts";
 import { CleanStyles } from "@/features/editor/extensions/clean-styles.ts";
+import { VimMode } from "@/features/editor/extensions/vim-mode.ts";
 
 const lowlight = createLowlight(common);
 lowlight.register("mermaid", plaintext);
@@ -456,6 +457,8 @@ export const mainExtensions = [
   AutoJoiner.configure({
     elementsToJoin: [],
   }),
+  // Inert until an editor opts in via setVimModeEnabled(); see vim-mode.ts.
+  VimMode,
 ] as any;
 
 type CollabExtensions = (provider: HocuspocusProvider, user: IUser) => any[];
