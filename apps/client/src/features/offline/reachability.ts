@@ -71,10 +71,22 @@ export const HEALTH_PROBE_PATH = "/api/health/live";
 /**
  * One probe.
  *
- * `credentials: "omit"` because the endpoint is public and a probe has no
- * business carrying the session cookie; the cache-busting parameter because an
- * intermediary proxy is not bound by `cache: "no-store"` and a cached `ok` is
- * exactly the lie this module cannot afford.
+ * **`credentials: "same-origin"`, and it is not incidental.** The endpoint itself
+ * needs no session, so an earlier version sent `"omit"` on the reasoning that a
+ * probe has no business carrying the session cookie. That is wrong here, and
+ * badly so on exactly the deployments this fork is aimed at: behind an
+ * authenticating reverse proxy (Cloudflare Access, oauth2-proxy, Authelia) a
+ * cookie-less request is redirected to the identity provider, `fetch` follows the
+ * redirect cross-origin, the IdP sends no `Access-Control-Allow-Origin`, and the
+ * request rejects. Every probe would then fail forever while the app worked
+ * perfectly — and since the verdict pauses React Query, an idle tab would stop
+ * fetching until a collaboration handshake rescued it. There is nothing to
+ * protect by omitting: this is our own origin, and every other request the app
+ * makes sends the same cookie.
+ *
+ * The cache-busting parameter is because an intermediary proxy is not bound by
+ * `cache: "no-store"`, and a cached `ok` is exactly the lie this module cannot
+ * afford.
  */
 export async function probeServerOnce(
   timeoutMs: number = PROBE_TIMEOUT_MS,
@@ -86,7 +98,7 @@ export async function probeServerOnce(
     await fetch(`${HEALTH_PROBE_PATH}?_=${Date.now()}`, {
       method: "GET",
       cache: "no-store",
-      credentials: "omit",
+      credentials: "same-origin",
       signal: controller.signal,
     });
     // Deliberately not `response.ok`: see the file comment.

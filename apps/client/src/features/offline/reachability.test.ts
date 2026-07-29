@@ -413,7 +413,7 @@ describe("probeServerOnce", () => {
     await expect(probeServerOnce(5)).resolves.toBe(false);
   });
 
-  it("asks our own origin, without the session cookie, uncacheably", async () => {
+  it("asks our own origin, uncacheably, carrying the session", async () => {
     const fetchMock = vi.fn(async () => ({ status: 200, ok: true }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -424,9 +424,18 @@ describe("probeServerOnce", () => {
       RequestInit,
     ];
     expect(url.startsWith(`${HEALTH_PROBE_PATH}?`)).toBe(true);
-    expect(init.credentials).toBe("omit");
     expect(init.cache).toBe("no-store");
     expect(init.method).toBe("GET");
+    /**
+     * **Not `"omit"`.** The endpoint needs no session, so omitting looks like
+     * hygiene — but behind an authenticating reverse proxy (Cloudflare Access,
+     * oauth2-proxy, Authelia) a cookie-less request is redirected to the identity
+     * provider, the redirect is followed cross-origin, and the fetch rejects on
+     * CORS. Every probe would fail forever on a perfectly healthy deployment, and
+     * the verdict pauses React Query. This assertion is the guard against the
+     * hygiene argument being made again.
+     */
+    expect(init.credentials).toBe("same-origin");
   });
 });
 
