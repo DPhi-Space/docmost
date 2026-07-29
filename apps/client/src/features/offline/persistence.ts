@@ -8,15 +8,26 @@
  *
  * What this buys: after a reload with no network the app still has the user, the
  * workspace, the space, the sidebar tree and every page that was visited, so it
- * boots and renders read-only content instead of a blank screen. The decision of
- * *what* is allowed on disk lives entirely in `query-allowlist.ts`.
+ * boots and renders read-only content instead of a blank screen. The decisions
+ * about *what* may be written, and *when*, live entirely in
+ * `persistence-policy.ts`.
  */
 
 import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 import { removeOldestQuery } from "@tanstack/react-query-persist-client";
+import type { PersistedClient, Persister } from "@tanstack/react-query-persist-client";
 import type { QueryClient } from "@tanstack/react-query";
 import { QUERY_CACHE_KEY, queryCacheStorage } from "./persisted-store";
-import { shouldDehydrateQuery } from "./query-allowlist";
+import { seedQueryOnlineState } from "./online-state";
+import {
+  isSnapshotWorthPersisting,
+  shouldDehydrateQuery,
+} from "./persistence-policy";
+
+// Runs on import, i.e. before `main.tsx` renders and therefore before the first
+// query observer mounts — which is the only moment at which this is still
+// useful. See `seedQueryOnlineState` for why it is load-bearing.
+seedQueryOnlineState();
 
 /**
  * How long a dehydrated cache stays usable. Long, because the value of offline
@@ -39,7 +50,7 @@ function cacheBuster(): string {
   return typeof APP_VERSION === "string" ? APP_VERSION : "dev";
 }
 
-const persister = createAsyncStoragePersister({
+const storagePersister = createAsyncStoragePersister({
   storage: queryCacheStorage,
   key: QUERY_CACHE_KEY,
   throttleTime: PERSIST_THROTTLE_MS,
@@ -48,6 +59,20 @@ const persister = createAsyncStoragePersister({
   // try again — the tail of the cache is the least likely to be wanted offline.
   retry: removeOldestQuery,
 });
+
+/**
+ * Persistence overwrites the store wholesale, so a snapshot taken while the app
+ * cannot reach the server would erase a good offline cache. The guard is here
+ * rather than in the storage layer because this is the only place that can see
+ * what is actually being written.
+ */
+const persister: Persister = {
+  ...storagePersister,
+  persistClient: (client: PersistedClient) =>
+    isSnapshotWorthPersisting(client)
+      ? storagePersister.persistClient(client)
+      : undefined,
+};
 
 export const offlinePersistOptions = {
   persister,
@@ -65,17 +90,21 @@ export const offlinePersistOptions = {
  * persisted cache, a reload would otherwise show yesterday's sidebar and never
  * refresh it.
  *
- * Invalidating with `refetchType: "active"` on the next task fixes that at
- * exactly the right scope: by then the app has mounted, so "active" means the
- * queries actually on screen — those refetch (invalidation overrides
- * `refetchOnMount`), and the long tail of restored-but-unused entries stays on
- * disk costing nothing. Offline, this is skipped entirely: React Query's
- * `networkMode: "online"` would only park the fetches, but skipping keeps the
- * offline boot free of pointless paused queries.
+ * Invalidating with `refetchType: "active"` fixes that at exactly the right
+ * scope: "active" means the queries with a mounted observer, i.e. the ones on
+ * screen — those refetch (invalidation overrides `refetchOnMount`), while the
+ * long tail of restored-but-unused entries stays on disk costing nothing.
+ *
+ * The delay is the point: this runs from the restore promise, before React has
+ * re-rendered with `isRestoring: false` and therefore before a single observer
+ * has mounted. Invalidating then would match nothing at all. Offline it is
+ * skipped outright — the fetches would only park as paused.
  */
+const RESTORE_INVALIDATE_DELAY_MS = 500;
+
 export function onQueryCacheRestored(queryClient: QueryClient): void {
   if (typeof navigator !== "undefined" && navigator.onLine === false) return;
   setTimeout(() => {
     void queryClient.invalidateQueries({ refetchType: "active" });
-  }, 0);
+  }, RESTORE_INVALIDATE_DELAY_MS);
 }

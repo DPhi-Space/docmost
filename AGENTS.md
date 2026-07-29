@@ -148,24 +148,41 @@ exported `queryClient` instance — a dozen modules import that binding directly
 wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-client`,
 `@tanstack/query-async-storage-persister`, `idb-keyval`), the first this feature has needed.
 
-- **`query-allowlist.ts` is the whole policy and it is an allowlist, never a denylist.** Only
-  queries whose `queryKey[0]` is on the list reach disk. New query keys appear constantly in this
-  app; a denylist would silently start persisting each one. `collab-token` is a live JWT and must
-  never appear on the list — that is asserted by test, as is every other excluded family
-  (search keys have unbounded cardinality, `notifications` is registered `gcTime: 0`).
+- **`persistence-policy.ts` holds the whole policy, and the query filter is an allowlist, never
+  a denylist.** Only queries whose `queryKey[0]` is on the list reach disk. New query keys appear
+  constantly in this app; a denylist would silently start persisting each one. `collab-token` is
+  a live JWT and must never appear on the list — that is asserted by test, as is every other
+  excluded family (search keys have unbounded key cardinality, `notifications` is registered
+  `gcTime: 0`).
+- **React Query's `onlineManager` must be seeded from `navigator.onLine` at boot**
+  (`online-state.ts`). It initialises to `online = true` and only ever reacts to `online` /
+  `offline` *events*, so a tab loaded while already offline never learns the truth: instead of
+  pausing fetches it runs every restored query into a network error. That single default is what
+  stands between a persisted cache and a usable offline app — without the seed the app renders
+  "Error fetching page data." on top of a perfectly good cache, *and* the errored cache is then
+  written over the good one. Both were observed in a browser.
+- **A snapshot is only written if it contains `currentUser`** (`isSnapshotWorthPersisting`).
+  Persistence replaces the store wholesale and only successful queries are dehydrated, so a
+  session that cannot reach the server would otherwise erase a good offline cache. Measured: one
+  reload against an unreachable server left three page entries and no user.
 - **`UserProvider` renders whenever cached user data exists.** Previously it returned an empty
   fragment while `/users/me` was loading or errored, which is why phase 1a booted to a white
   screen. It now blanks only while the cache is still restoring or when there is no user data at
   all. Without this the persisted cache is invisible.
 - **Restore invalidates active queries** (`onQueryCacheRestored`). The app's defaults are
   `refetchOnMount: false` + `staleTime: 5m`, which was harmless when a reload started from an
-  empty cache and would otherwise pin a reloaded tab to yesterday's sidebar forever.
+  empty cache and would otherwise pin a reloaded tab to yesterday's sidebar forever. The delay
+  before invalidating is load-bearing: the callback fires before React has re-rendered, so no
+  observer is active yet and `refetchType: "active"` would match nothing.
 - **`clearOfflineData()` runs on both session exits** (`handleLogout` and the 401 handler's
   `redirectToLogin`). It stops persistence *first* so a throttled write cannot restore what it
   erases, then drops the dehydrated cache, every `page.*` y-indexeddb database (a pre-existing
-  leak that predates this work) and the SW runtime caches. It deliberately **keeps the build's
-  precache**: that holds compiled assets only, and an activated worker never re-runs `install`,
-  so deleting it would break offline boot until the next deploy.
+  leak that predates this work) and the SW runtime caches. Two deliberate omissions:
+  it **keeps the build's precache** (compiled assets only, and an activated worker never re-runs
+  `install`, so deleting it would break offline boot until the next deploy); and it **does not
+  `deleteDatabase` its own store**, only clears its records — idb-keyval holds the connection
+  open with no `versionchange` handler, so the delete parks as `blocked` and then blocks every
+  later `indexedDB.open` of that name for the life of the document.
 
 ## Adopting a newer upstream release
 

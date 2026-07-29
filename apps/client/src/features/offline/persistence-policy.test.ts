@@ -3,8 +3,9 @@ import {
   NEVER_PERSISTED_QUERY_KEY_ROOTS,
   PERSISTED_QUERY_KEY_ROOTS,
   isPersistableQueryKey,
+  isSnapshotWorthPersisting,
   shouldDehydrateQuery,
-} from "./query-allowlist";
+} from "./persistence-policy";
 
 const success = { status: "success" };
 
@@ -105,5 +106,48 @@ describe("shouldDehydrateQuery", () => {
       shouldDehydrateQuery({ queryKey: [root, "x"], state: success }),
     );
     expect(persisted).toEqual([]);
+  });
+});
+
+describe("isSnapshotWorthPersisting", () => {
+  const snapshot = (keys: readonly unknown[][]) => ({
+    clientState: { queries: keys.map((queryKey) => ({ queryKey })) },
+  });
+
+  it("accepts a snapshot from a booted, authenticated session", () => {
+    expect(
+      isSnapshotWorthPersisting(
+        snapshot([
+          ["currentUser"],
+          ["space", "s1"],
+          ["pages", "abc"],
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses a snapshot taken before the app finished booting", () => {
+    expect(isSnapshotWorthPersisting(snapshot([]))).toBe(false);
+  });
+
+  // The exact shape observed in a browser when the server was unreachable: the
+  // user query had errored out, leaving a handful of stale page entries that
+  // would have replaced a complete offline cache.
+  it("refuses a snapshot whose user query failed", () => {
+    expect(
+      isSnapshotWorthPersisting(
+        snapshot([
+          ["space", "s1"],
+          ["pages", "uuid-1"],
+          ["pages", "slug-1"],
+        ]),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not mistake another key for the user query", () => {
+    expect(
+      isSnapshotWorthPersisting(snapshot([["currentUserSomethingElse"]])),
+    ).toBe(false);
   });
 });

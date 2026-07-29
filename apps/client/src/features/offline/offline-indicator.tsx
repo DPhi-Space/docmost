@@ -12,7 +12,7 @@
 import { Group, Paper, Text, Transition } from "@mantine/core";
 import { IconWifiOff } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
-import { useOnlineStatus } from "./use-online-status";
+import { useOnlineStatus } from "./online-state";
 import classes from "./offline-indicator.module.css";
 
 export function OfflineIndicator() {

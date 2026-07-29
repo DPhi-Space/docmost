@@ -42,6 +42,23 @@ export function resumePersistingQueryCacheForTests(): void {
 }
 
 /**
+ * An offline session can only ever *lose* information: nothing new can be
+ * fetched, queries for pages that were never visited park as `pending`, and
+ * inactive entries age out of the cache. Dehydrating that over a store written
+ * by a healthy online session would quietly erode it, one offline reload at a
+ * time — which is exactly what happened in a browser before this guard existed
+ * (`currentUser` and the sidebar tree disappeared after a single offline
+ * reload, so the *second* one booted blank).
+ *
+ * So the store is only ever written from a session that believes it has a
+ * network. Skipping the write costs nothing, because there is nothing to save
+ * that is not already saved.
+ */
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+/**
  * `AsyncStorage` as `@tanstack/query-async-storage-persister` expects it:
  * `getItem` resolves `null` when absent, and all three reject-safe.
  */
@@ -51,7 +68,7 @@ export const queryCacheStorage = {
     return value ?? null;
   },
   setItem: async (key: string, value: string): Promise<void> => {
-    if (writesDisabled) return;
+    if (writesDisabled || isOffline()) return;
     await set(key, value, store);
   },
   removeItem: async (key: string): Promise<void> => {
@@ -60,16 +77,17 @@ export const queryCacheStorage = {
 };
 
 /**
- * Erase the dehydrated cache. Records go first, so the data is unrecoverable
- * even if the database itself survives; dropping the (now empty) database is a
- * best-effort tidy-up that must never block the caller, because an open
- * idb-keyval connection makes `deleteDatabase` wait for `versionchange`.
+ * Erase the dehydrated cache: every record goes, leaving an empty database.
+ *
+ * The empty database shell is left in place **deliberately**. Dropping it with
+ * `deleteDatabase` looks tidier and is actively harmful: idb-keyval holds its
+ * connection open and registers no `versionchange` handler, so the request
+ * parks in the `blocked` state — and a blocked delete makes every *subsequent*
+ * `indexedDB.open` of that name queue behind it. Measured in a browser: after a
+ * logout that called `deleteDatabase`, nothing else in the document could open
+ * the database again. No user data survives a `clear`, so the shell buys
+ * nothing worth that.
  */
 export async function deletePersistedQueryCache(): Promise<void> {
   await clear(store);
-  try {
-    globalThis.indexedDB?.deleteDatabase(QUERY_CACHE_DB_NAME);
-  } catch {
-    /* the records are already gone; an orphaned empty database is harmless */
-  }
 }

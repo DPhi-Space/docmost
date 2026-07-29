@@ -1,10 +1,11 @@
 /**
- * Which React Query entries are allowed to leave memory and land on disk.
+ * What offline persistence is allowed to write, and when.
  *
- * This is the whole security and size policy of offline persistence, kept pure
- * and dependency-free so it can be unit tested exhaustively. `persistence.ts`
- * is the only caller; it does nothing but hand each query to
- * {@link shouldDehydrateQuery}.
+ * Two decisions, both pure and dependency-free so they can be unit tested
+ * exhaustively: which queries may leave memory ({@link shouldDehydrateQuery}),
+ * and whether a given snapshot is worth writing at all
+ * ({@link isSnapshotWorthPersisting}). `persistence.ts` is the only caller and
+ * does nothing but delegate here.
  *
  * The rule is an **allowlist keyed on `queryKey[0]`** — never a denylist. New
  * query keys appear in this app all the time (search variants, EE settings,
@@ -111,4 +112,31 @@ export interface DehydrationCandidate {
 export function shouldDehydrateQuery(query: DehydrationCandidate): boolean {
   if (query.state.status !== "success") return false;
   return isPersistableQueryKey(query.queryKey);
+}
+
+/**
+ * Whether a dehydrated snapshot may overwrite the one already on disk.
+ *
+ * Persistence replaces the store wholesale, and only successful queries are
+ * dehydrated — so a session that cannot reach the server produces a snapshot
+ * with most of its entries missing, and writing it *erases* a good offline
+ * cache. Observed in a browser before this guard existed: one reload against an
+ * unreachable server left the store with three page entries and no user, so the
+ * next offline boot rendered nothing.
+ *
+ * `currentUser` is the tell. Every authenticated app load fetches it, it is on
+ * the allowlist, and it is absent from a snapshot in exactly two situations:
+ * the app has not finished booting, or `/users/me` is failing. In both, what is
+ * already on disk is better than what is in memory.
+ *
+ * This deliberately does not try to be a general "is the new state at least as
+ * good as the old" comparison: that needs the previous store read back on every
+ * throttled write, and the cheap test catches the failure that actually occurs.
+ */
+export function isSnapshotWorthPersisting(snapshot: {
+  clientState: { queries: ReadonlyArray<{ queryKey: readonly unknown[] }> };
+}): boolean {
+  return snapshot.clientState.queries.some(
+    (query) => query.queryKey[0] === "currentUser",
+  );
 }
