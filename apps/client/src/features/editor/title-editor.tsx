@@ -28,6 +28,9 @@ import localEmitter from "@/lib/local-emitter.ts";
 import { PageEditMode } from "@/features/user/types/user.types.ts";
 import { searchSpotlight } from "@/features/search/constants.ts";
 import { platformModifierKey } from "@/lib";
+import { Tooltip } from "@mantine/core";
+import { useOnlineStatus } from "@/features/offline/online-state";
+import { useOfflineEditingEnabled } from "@/features/offline/offline-editing-settings";
 
 export interface TitleEditorProps {
   pageId: string;
@@ -55,6 +58,21 @@ export function TitleEditor({
   const navigate = useNavigate();
   const [activePageId, setActivePageId] = useState(pageId);
   const currentPageEditMode = useAtomValue(currentPageEditModeAtom);
+
+  /**
+   * The page title is **not** part of the Yjs document: it is saved by a
+   * debounced `POST /api/pages/update` with no optimistic write, no retry and no
+   * queue. Offline, that request simply fails and the typed title is lost
+   * without a word — a silent data loss that phase 2 would otherwise make far
+   * easier to hit, since the body of the page *is* editable offline.
+   *
+   * Until a title outbox exists, the honest behaviour is to refuse the edit and
+   * say why. Gated on the offline-editing switch so that with the switch off
+   * the title editor behaves exactly as it does on the base release.
+   */
+  const offlineEditingEnabled = useOfflineEditingEnabled();
+  const isOnline = useOnlineStatus();
+  const titleLockedOffline = offlineEditingEnabled && !isOnline;
 
   const titleEditor = useEditor({
     extensions: [
@@ -186,8 +204,12 @@ export function TitleEditor({
 
   useEffect(() => {
     if (!titleEditor) return;
-    titleEditor.setEditable(editable && currentPageEditMode === PageEditMode.Edit);
-  }, [currentPageEditMode, titleEditor, editable]);
+    titleEditor.setEditable(
+      editable &&
+        currentPageEditMode === PageEditMode.Edit &&
+        !titleLockedOffline,
+    );
+  }, [currentPageEditMode, titleEditor, editable, titleLockedOffline]);
 
   const openSearchDialog = () => {
     const event = new CustomEvent("openFindDialogFromEditor", {});
@@ -248,18 +270,35 @@ export function TitleEditor({
     }
   }
 
+  const titleContent = (
+    <EditorContent
+      editor={titleEditor}
+      onKeyDown={(event) => {
+        // First handle the search hotkey
+        getHotkeyHandler([["mod+F", openSearchDialog]])(event);
+
+        // Then handle other key events
+        handleTitleKeyDown(event);
+      }}
+    />
+  );
+
+  // Wrapped only while locked, so the rendered DOM is untouched in every other
+  // case — including with the offline-editing switch off.
   return (
     <div className="page-title">
-      <EditorContent
-        editor={titleEditor}
-        onKeyDown={(event) => {
-          // First handle the search hotkey
-          getHotkeyHandler([["mod+F", openSearchDialog]])(event);
-
-          // Then handle other key events
-          handleTitleKeyDown(event);
-        }}
-      />
+      {titleLockedOffline ? (
+        <Tooltip
+          label={t("Title editing requires a connection")}
+          position="top-start"
+          openDelay={100}
+          withArrow
+        >
+          <div>{titleContent}</div>
+        </Tooltip>
+      ) : (
+        titleContent
+      )}
     </div>
   );
 }
