@@ -8,7 +8,7 @@ import {
   type Mode,
   type VimState,
 } from "vim-prosemirror";
-import { platformModifierKey } from "@/lib";
+import { isApplePlatform } from "@/lib";
 import "vim-prosemirror/style.css";
 import "@/features/editor/styles/vim-mode.css";
 
@@ -57,14 +57,28 @@ function isVimEnabled(editor: Editor | null | undefined): boolean {
 }
 
 /**
+ * Ctrl chords the browser and the app keep on non-Apple platforms, where Ctrl
+ * is both the vim modifier and the OS one: clipboard, select-all, undo/redo,
+ * and our find dialog. vim loses Ctrl-f (page forward) there; everything else
+ * it binds (Ctrl-r/d/u/b) still reaches it.
+ */
+const RESERVED_CTRL_KEYS = new Set(["a", "c", "v", "x", "z", "y", "f"]);
+
+/**
  * Keys the vim layer must not swallow, whatever mode it is in.
  */
 function shouldBypassVim(event: KeyboardEvent): boolean {
-  // Find & replace. vim-prosemirror consumes Ctrl-f (page forward) in normal
-  // mode and only ever checks `ctrlKey`, so on Windows/Linux it would eat the
-  // find dialog's shortcut. Give the dialog priority on every platform; on
-  // macOS the modifier is Cmd, so Ctrl-f still reaches vim.
-  if (platformModifierKey(event) && (event.key === "f" || event.key === "F")) {
+  // vim-prosemirror never looks at metaKey — it reads Cmd-V as a bare "v"
+  // (enter visual mode), Cmd-C as the change operator and Cmd-X as delete-
+  // character, so on macOS copy/cut/paste silently do the wrong thing in
+  // normal mode. Nothing in vim binds Cmd or Alt, so hand those back whole.
+  if (event.metaKey || event.altKey) return true;
+
+  if (
+    event.ctrlKey &&
+    !isApplePlatform &&
+    RESERVED_CTRL_KEYS.has(event.key.toLowerCase())
+  ) {
     return true;
   }
 
@@ -95,28 +109,26 @@ export const VimMode = Extension.create({
     const runtime: VimRuntime = { enabled: false };
     runtimes.set(editor, runtime);
 
-    const commands = editor.commands as Record<string, any>;
+    // Resolved per keypress, never captured. `addProseMirrorPlugins` runs
+    // while the editor is still being constructed, so the command map read
+    // here would be a stale, empty one — which is what silently broke `u`.
+    const command = (name: string) =>
+      (editor.commands as Record<string, any> | undefined)?.[name];
 
     const plugin = createVimPlugin({
       // Undo/redo belong to whoever owns history. With collaboration that is
       // the Yjs UndoManager; without it there is no history at all and vim's
       // `u` / `Ctrl-r` are correctly inert instead of a TypeError.
-      undo: () =>
-        safeRun(() =>
-          typeof commands.undo === "function" ? commands.undo() : false,
-        ),
-      redo: () =>
-        safeRun(() =>
-          typeof commands.redo === "function" ? commands.redo() : false,
-        ),
+      undo: () => safeRun(() => command("undo")?.()),
+      redo: () => safeRun(() => command("redo")?.()),
       indent: () =>
-        safeRun(() => commands.sinkListItem?.("listItem")) ||
-        safeRun(() => commands.sinkListItem?.("taskItem")) ||
-        safeRun(() => commands.indent?.()),
+        safeRun(() => command("sinkListItem")?.("listItem")) ||
+        safeRun(() => command("sinkListItem")?.("taskItem")) ||
+        safeRun(() => command("indent")?.()),
       outdent: () =>
-        safeRun(() => commands.liftListItem?.("listItem")) ||
-        safeRun(() => commands.liftListItem?.("taskItem")) ||
-        safeRun(() => commands.outdent?.()),
+        safeRun(() => command("liftListItem")?.("listItem")) ||
+        safeRun(() => command("liftListItem")?.("taskItem")) ||
+        safeRun(() => command("outdent")?.()),
     });
 
     // `plugin.props` holds the handlers already bound to the plugin, so they
