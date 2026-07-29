@@ -20,6 +20,7 @@ import {
   offlinePersistOptions,
   onQueryCacheRestored,
 } from "@/features/offline/persistence";
+import { startReachabilityMonitor } from "@/features/offline/reachability";
 import { PostHogProvider } from "posthog-js/react";
 import {
   getPostHogHost,
@@ -39,6 +40,14 @@ export const queryClient = new QueryClient({
     },
   },
 });
+
+/**
+ * Start answering "can we reach the server" for real, before the first render.
+ *
+ * Explicit rather than on import so that no unit test rendering a component ever
+ * sends a request; see `features/offline/reachability.ts`.
+ */
+startReachabilityMonitor();
 
 if (isCloud() && isPostHogEnabled) {
   posthog.init(getPostHogKey(), {
