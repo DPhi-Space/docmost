@@ -25,6 +25,11 @@ import { Feature } from '../../common/features';
 //     UI toggle + the workspace write-gate (workspace.service.ts) both go
 //     through hasFeature('mcp'); the /mcp endpoint enforces space membership
 //     natively via SpaceAbilityFactory.
+//   - PERSONAL_SPACES: native personal-space backend (core/personal-space).
+//     The schema (spaces.is_personal + the one-per-creator unique index),
+//     SpaceService's isPersonal option and the workspace toggle write-gate
+//     (workspace.service.ts) already ship natively; only the two endpoints the
+//     client calls were EE-only.
 const FORK_ENABLED_FEATURES: string[] = [
   Feature.API_KEYS,
   Feature.SECURITY_SETTINGS,
@@ -33,6 +38,7 @@ const FORK_ENABLED_FEATURES: string[] = [
   Feature.VIEWER_COMMENTS,
   Feature.TEMPLATES,
   Feature.MCP,
+  Feature.PERSONAL_SPACES,
 ];
 
 @Injectable()
