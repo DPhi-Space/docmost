@@ -25,6 +25,7 @@ import type { ICurrentUser } from "@/features/user/types/user.types";
 import { getMyInfo } from "@/features/user/services/user-service";
 import { reconcileOfflineDataOwnership } from "./data-ownership";
 import { setDirtyPageLinkResolver } from "./dirty-page-link";
+import { setOfflineDataOwner } from "./dirty-pages";
 import { createResyncManager, type ResyncManager } from "./resync-manager";
 import { resetResyncState } from "./resync-state";
 import { clearPendingRecovery, rememberOfflineDataOwner } from "./session-expiry";
@@ -111,17 +112,47 @@ export function useOfflineDataOwnership(): void {
         return;
       }
 
-      // The hint the 401 handler will read. Recorded unconditionally, because a
-      // session whose owner was never recorded is a session whose work cannot
-      // be preserved at all (`session-expiry.ts` refuses rather than guessing).
-      rememberOfflineDataOwner(userId);
-
       const outcome = await reconcileOfflineDataOwnership(userId);
+      if (cancelled || outcome === "deferred") return;
+
+      /**
+       * **Claim the disk, on every authenticated boot — and only now.**
+       *
+       * Two ways existed for offline data to end up with *no* owner recorded,
+       * and `reconcileOfflineDataOwnership` reads a missing stamp as "nothing
+       * was preserved, so it is yours":
+       *
+       * 1. `redirectToLogin` does not await the session-expiry cleanup before
+       *    assigning `window.location.href`, so the navigation can kill it
+       *    before the stamp write — two IndexedDB round trips away — lands.
+       * 2. A user can reach `/auth/login` directly, with no cached
+       *    `currentUser` to redirect them, so **no 401 ever fires** and the
+       *    only code that used to stamp never runs.
+       *
+       * Either way the next user's reconcile saw `"none"` and opened the
+       * readers on the previous user's dirty pages — the leak class this has
+       * already been fixed for twice. Stamping every boot makes `"none"` mean
+       * *"a browser that has never held anyone's offline data"* and nothing
+       * else.
+       *
+       * **Ordering is the whole safety argument.** This runs *after* reconcile
+       * has decided. Stamping first would relabel data that reconcile was
+       * about to identify as somebody else's — turning the check that protects
+       * the previous user into the thing that hides them.
+       *
+       * The hint is (re-)written here for the same reason and in the same
+       * breath: reconcile's erase path calls `clearOfflineData()`, which drops
+       * it, and without this a 401 later in that same session would find no
+       * hint and destroy the new user's pending work rather than preserve it.
+       */
+      rememberOfflineDataOwner(userId);
+      await setOfflineDataOwner(userId);
+
       // The login-page notice has done its job once the owner is settled. It is
       // consumed *here* and used as the trigger for nothing: treating "the
       // notice is gone" as "the data is settled" was one of the three ways the
       // leak was reached.
-      if (outcome !== "deferred") clearPendingRecovery();
+      clearPendingRecovery();
     })();
 
     return () => {

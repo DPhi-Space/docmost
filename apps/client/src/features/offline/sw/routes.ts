@@ -90,15 +90,29 @@ export function resolveRoute(
 
   if (isRealtimePath(url.pathname)) return "passthrough";
 
-  if (isNavigationRequest(request)) return "navigation";
-
-  if (url.pathname.startsWith(LOCALE_PATH_PREFIX)) return "locale";
-
+  /**
+   * **The API is classified before navigations, and the order is the point.**
+   *
+   * The app opens attachments with `window.open(downloadUrl)`, which is a
+   * top-level navigation to `/api/files/...`. Classified as a navigation it
+   * went through NetworkFirst with a 3 s timeout, so a file whose first byte
+   * was slow — a large attachment, cold storage, a loaded server — was
+   * answered with the **cached application shell instead of the file**, while
+   * the browser was fully online. Nothing about that failure looks like a
+   * caching bug from the outside: the download simply produces an HTML page.
+   *
+   * No path under `/api/` is ever an SPA route, so none of them wants the
+   * shell fallback. Deciding on the path first removes the whole class.
+   */
   if (url.pathname.startsWith(FILE_API_PATH_PREFIX)) return "api-file";
 
   // Every other API call passes through untouched: no stale reads, and phase 1b
   // owns offline data via the persisted React Query cache instead.
   if (url.pathname.startsWith(API_PATH_PREFIX)) return "passthrough";
+
+  if (isNavigationRequest(request)) return "navigation";
+
+  if (url.pathname.startsWith(LOCALE_PATH_PREFIX)) return "locale";
 
   if (isShellAssetPath(url.pathname)) return "asset";
 

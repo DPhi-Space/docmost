@@ -19,8 +19,11 @@
  * privacy control and not a feature — an audit found that gating it here meant
  * a user who simply declined offline editing thereby declined the cleanup that
  * keeps the previous user's documents out of their session. It reads one key
- * from the dirty-page store, which creates that (empty) IndexedDB database on
- * every authenticated boot. No record is ever written with the switch off.
+ * from the dirty-page store *and stamps it with the signed-in user*, which
+ * creates that IndexedDB database on every authenticated boot and leaves one
+ * record in it: the owner stamp. No **page** record is ever written with the
+ * switch off, and the stamp is what makes an unstamped disk mean "nobody has
+ * ever kept offline data here" (see `data-ownership.ts`).
  *
  * **The rest of the claim is about the editor, not about the app.** Phases 1a and 1b are
  * unconditional by design and this switch does not reach them: the service

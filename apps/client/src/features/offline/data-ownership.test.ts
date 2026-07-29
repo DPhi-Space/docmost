@@ -14,20 +14,31 @@ import {
   reconcileOfflineDataOwnership,
   resetOwnershipForTests,
 } from "./data-ownership";
-import type { OfflineDataOwner } from "./dirty-pages";
+import type {
+  DirtyPageRecord,
+  DirtyPagesRead,
+  OfflineDataOwner,
+} from "./dirty-pages";
 
-function harness(owner: OfflineDataOwner) {
+function harness(owner: OfflineDataOwner, pages: DirtyPagesRead = { readable: true, records: [] }) {
   const cleared: string[] = [];
   return {
     cleared,
     deps: {
       readOfflineDataOwner: async () => owner,
+      readDirtyPages: async () => pages,
       clearOfflineData: async () => {
         cleared.push("cleared");
       },
     },
   };
 }
+
+const record = (pageId: string): DirtyPageRecord => ({
+  pageId,
+  dirtySince: 1,
+  updatedAt: 1,
+});
 
 describe("offlineDataIsOurs", () => {
   beforeEach(resetOwnershipForTests);
@@ -43,8 +54,8 @@ describe("offlineDataIsOurs", () => {
 describe("reconcileOfflineDataOwnership", () => {
   beforeEach(resetOwnershipForTests);
 
-  it("opens the readers when nothing was ever preserved", async () => {
-    const h = harness({ status: "none" });
+  it("opens the readers on a browser that has never held offline data", async () => {
+    const h = harness({ status: "none" }, { readable: true, records: [] });
 
     await expect(
       reconcileOfflineDataOwnership("user-1", h.deps),
@@ -52,6 +63,52 @@ describe("reconcileOfflineDataOwnership", () => {
 
     expect(offlineDataIsOurs()).toBe(true);
     expect(h.cleared).toEqual([]);
+  });
+
+  it("does not assume unstamped data is ours", async () => {
+    // Every authenticated boot stamps the disk, so an absent stamp *should*
+    // mean "fresh browser". It is not proof of it: a stamp write can fail on
+    // quota, and `redirectToLogin` does not await the session-expiry cleanup
+    // before navigating, so the write can be killed in flight. Work nobody has
+    // claimed is indistinguishable from a stranger's from the next user's
+    // point of view.
+    const h = harness(
+      { status: "none" },
+      { readable: true, records: [record("p1")] },
+    );
+
+    await expect(reconcileOfflineDataOwnership("user-2", h.deps)).resolves.toBe(
+      "erased",
+    );
+
+    expect(h.cleared).toEqual(["cleared"]);
+  });
+
+  it("erases when the stamp is absent and the records cannot be read", async () => {
+    const h = harness({ status: "none" }, { readable: false });
+
+    await expect(reconcileOfflineDataOwnership("user-2", h.deps)).resolves.toBe(
+      "erased",
+    );
+
+    expect(h.cleared).toEqual(["cleared"]);
+  });
+
+  it("does not consult the records once the stamp answers", async () => {
+    // The stamp is the answer when it exists; the record check is only the
+    // fallback for the case where it does not.
+    let asked = 0;
+    const h = harness({ status: "known", ownerUserId: "user-1" });
+
+    await reconcileOfflineDataOwnership("user-1", {
+      ...h.deps,
+      readDirtyPages: async () => {
+        asked += 1;
+        return { readable: true, records: [] };
+      },
+    });
+
+    expect(asked).toBe(0);
   });
 
   it("opens the readers for the owner", async () => {

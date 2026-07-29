@@ -30,6 +30,7 @@ const dirtyPages = vi.hoisted(() => ({
   blockedPages: vi.fn(() => []),
   readOfflineDataOwner: vi.fn(async () => ({ status: "none" }) as const),
   setOfflineDataOwner: vi.fn(async () => true),
+  readDirtyPages: vi.fn(async () => ({ readable: true, records: [] }) as const),
 }));
 const persistedStore = vi.hoisted(() => ({
   deletePersistedQueryCache: vi.fn(async () => {}),
