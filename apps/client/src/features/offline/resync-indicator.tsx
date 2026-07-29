@@ -57,11 +57,17 @@ export function ResyncIndicator() {
     if (!lastPass || lastPass.synced === 0) return;
     if (toastedRef.current === lastPass.at) return;
     toastedRef.current = lastPass.at;
+    // Singularised in code: the repo convention is English-string keys with no
+    // translation-file edits, so i18next's `_one`/`_other` plural keys are not
+    // available here.
     notifications.show({
       color: "green",
-      message: t("Offline changes synced ({{count}} pages)", {
-        count: lastPass.synced,
-      }),
+      message:
+        lastPass.synced === 1
+          ? t("Offline changes synced (1 page)")
+          : t("Offline changes synced ({{count}} pages)", {
+              count: lastPass.synced,
+            }),
     });
   }, [lastPass, t]);
 
@@ -109,9 +115,11 @@ export function ResyncIndicator() {
           <Group gap={8} wrap="nowrap">
             <IconAlertTriangle size={16} stroke={1.5} color="orange" />
             <Text size="sm" c="dimmed">
-              {t("{{count}} pages could not sync — review", {
-                count: blocked.length,
-              })}
+              {blocked.length === 1
+                ? t("1 page could not sync — review")
+                : t("{{count}} pages could not sync — review", {
+                    count: blocked.length,
+                  })}
             </Text>
           </Group>
         </UnstyledButton>

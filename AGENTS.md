@@ -151,6 +151,15 @@ lines in a repo where the lockfile is load-bearing. The replacement adds **zero 
    therefore has no `COLLAB_URL`/`CLOUD`/upload limits and breaks the app. `isPrecachableFile`
    rejects every `.html`, and navigations are **NetworkFirst (3 s timeout)** falling back to a
    single runtime-cached copy of the last HTML the server actually served.
+   The runtime asset/locale caches enforce the same rule from the other side
+   (`isCacheableAsset`, issue #36): the SPA catch-all answers **200 `text/html`** for any
+   unknown path, so in the deploy race — an old tab requests a hashed chunk the new deploy
+   deleted — a status-only check stored the app shell in the CacheFirst `assets-v1` cache,
+   where it stuck until logout. Anything HTML-shaped is refused there; `GET /api/files/*` is
+   deliberately exempt, since no `/api` path reaches the catch-all and an uploaded `.html`
+   attachment is legitimate HTML. Runtime cache writes also happen off the response path
+   (`event.waitUntil`, issue #37): `cache.put` consumes the body, so awaiting it before
+   returning delayed first byte by the full download.
 
 **The API is classified before navigations** (`sw/routes.ts`). The app downloads attachments
 with `window.open(downloadUrl)` — a *top-level navigation* to `/api/files/...`. Classified as a
@@ -398,13 +407,19 @@ local edit on a disconnected provider; `resync-manager.ts` walks it one page at 
   `ydoc.destroy()` at the end, which the editor does not need (its document dies with the
   component) and a loop that opens one per page per pass does.
 - **`blocked` vs `retry` is the whole judgement**, and the discriminator is whether a handshake
-  was ever observed. `provider.synced` is set when the **server sends SyncStep2**
+  was observed **on a connection that is still live and synced at the deadline** (issue #35 —
+  an earlier version latched the handshake alone, so a socket that died mid-push was reported
+  as "the server refused"). `provider.synced` is set when the **server sends SyncStep2**
   (`applySyncMessage`), so it becomes true even on a read-only connection; `unsyncedChanges` is
   seeded to exactly 1 by `startSync()` (`resetUnsyncedChanges` *assigns*, discarding anything
   counted while the socket was still opening) and decremented only by `SyncStatus(true)` — there
   is no `false` branch (see the phase-2 notes above). So: handshake seen + counter drained =
-  pushed; handshake seen + counter pinned = **the server refused** (locked/trashed/read-only) →
-  `blocked`, kept and surfaced; no handshake = unreachable → `retry`, entry untouched, backoff.
+  pushed; connection live and synced at the deadline + counter pinned = **the server refused**
+  (locked/trashed/read-only) → `blocked`, kept and surfaced; no handshake = unreachable →
+  `retry` (`no-handshake`), entry untouched, backoff; handshake seen but the socket down (or
+  not re-synced) at the deadline = a flaky link → `retry` (`connection-lost`), same treatment.
+  The in-editor warning (`unsynced-changes.ts`) never had this defect: its rule 1 resets the
+  pending clock whenever live sync is lost, so it only judges a connection that is answering.
   A dead network must never be reported to the user as "this page could not sync", and a locked
   page must never be retried in silence forever. Authentication failure with a token
   `isCollabTokenExpired()` says is still valid is the other `blocked` reason: the page was
