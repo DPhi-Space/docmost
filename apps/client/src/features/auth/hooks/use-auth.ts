@@ -169,6 +169,10 @@ export default function useAuth() {
   const handleLogout = async () => {
     setCurrentUser(RESET);
     await logout();
+    // The user is done with this machine, so everything goes — including
+    // offline edits that were never pushed. Unlike the 401 path
+    // (`session-expiry.ts`), which keeps them, this is the shared-machine exit
+    // #18 made non-optional. Do not soften it here.
     await clearOfflineData({ queryClient });
     window.location.replace(`${APP_ROUTE.AUTH.LOGIN}?logout=1`);
   };

@@ -23,11 +23,23 @@
  * the `page.<pageId>` databases, which step (2) removes in the same pass. The
  * registry is an index, and it is dropped alongside what it indexes.
  *
- * Called from both exits of an authenticated session: the explicit
- * `handleLogout` and the 401 handler's `redirectToLogin`. Both end in a
- * full-page navigation, so this runs on a document that is about to die — every
- * step is therefore best-effort and bounded, and a failure in one must never
- * prevent the others or delay the redirect.
+ * ## The two exits are NOT the same, and must not be re-unified
+ *
+ * This function is the **explicit logout** behaviour: `handleLogout`, the user
+ * saying "I am done with this machine". It erases everything, unconditionally,
+ * which is what #18 specified and what privacy on a shared machine requires.
+ *
+ * The 401 handler (`redirectToLogin`) goes through
+ * `clearOfflineDataOnSessionExpiry()` in `session-expiry.ts` instead, and
+ * deliberately keeps the documents holding unpushed edits. The reason the two
+ * differ is stated there in full; the short version is that #18 was written
+ * before phases 2 and 3 existed, when a `page.<pageId>` database held nothing
+ * but a cached copy of server content. It can now hold the **only** copy of the
+ * user's work, and an expired token is not the user leaving the machine.
+ *
+ * Both exits end in a full-page navigation, so this runs on a document that is
+ * about to die — every step is therefore best-effort and bounded, and a failure
+ * in one must never prevent the others or delay the redirect.
  */
 
 import { CACHE_PREFIX } from "./sw/cache-policy";
@@ -35,7 +47,10 @@ import {
   deletePersistedQueryCache,
   stopPersistingQueryCache,
 } from "./persisted-store";
-import { clearPageSyncMarkers } from "./sync-markers";
+import {
+  clearPageSyncMarkers,
+  clearPageSyncMarkersExcept,
+} from "./sync-markers";
 import { clearDirtyPages } from "./dirty-pages";
 
 /** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
@@ -68,7 +83,22 @@ export interface ClearOfflineDataDeps {
   clearPageSyncMarkers?: () => Promise<void>;
   /** Phase 3's registry of pages with edits that were never pushed. */
   clearDirtyPages?: () => Promise<void>;
+  clearPageSyncMarkersExcept?: (keep: readonly string[]) => Promise<void>;
   deleteTimeoutMs?: number;
+  /**
+   * Page ids whose `page.<pageId>` database — and sync marker — survive this
+   * call. **Only** `clearOfflineDataOnSessionExpiry` passes this, and only for
+   * pages the dirty registry says hold unpushed edits.
+   *
+   * Empty (the default) is the explicit-logout behaviour: keep nothing.
+   */
+  preservePageIds?: readonly string[];
+  /**
+   * Keep the dirty registry. Meaningless without `preservePageIds` — the
+   * registry is the index of the documents being preserved, and an index
+   * without its documents is worse than neither.
+   */
+  preserveDirtyPages?: boolean;
 }
 
 /**
@@ -135,8 +165,11 @@ export async function clearOfflineData(
     deletePersistedQueryCache: deleteCache = deletePersistedQueryCache,
     stopPersistingQueryCache: stopPersisting = stopPersistingQueryCache,
     clearPageSyncMarkers: clearMarkers = clearPageSyncMarkers,
+    clearPageSyncMarkersExcept: clearMarkersExcept = clearPageSyncMarkersExcept,
     clearDirtyPages: clearDirty = clearDirtyPages,
     deleteTimeoutMs = DEFAULT_DELETE_TIMEOUT_MS,
+    preservePageIds = [],
+    preserveDirtyPages = false,
   } = deps;
 
   // First, before anything else: make the persister refuse further writes, so a
@@ -151,9 +184,21 @@ export async function clearOfflineData(
 
   await Promise.allSettled([
     deleteCache(),
-    clearMarkers(),
-    clearDirty(),
-    deletePageDatabases(idb, fallbackNames, deleteTimeoutMs),
+    // A marker for a page whose document has just been deleted is precisely the
+    // "marker without content" state the gate refuses to trust, so the two are
+    // narrowed together or not at all.
+    preservePageIds.length > 0
+      ? clearMarkersExcept(preservePageIds)
+      : clearMarkers(),
+    preserveDirtyPages && preservePageIds.length > 0
+      ? Promise.resolve()
+      : clearDirty(),
+    deletePageDatabases(
+      idb,
+      fallbackNames,
+      deleteTimeoutMs,
+      preservePageIds.map((id) => `${PAGE_DB_PREFIX}${id}`),
+    ),
     deleteRuntimeCaches(cacheStorage),
   ]);
 
@@ -164,6 +209,7 @@ async function deletePageDatabases(
   idb: IDBFactory | null | undefined,
   fallbackNames: readonly string[],
   timeoutMs: number,
+  preserveNames: readonly string[] = [],
 ): Promise<void> {
   if (!idb) return;
 
@@ -177,8 +223,11 @@ async function deletePageDatabases(
     names = fallbackNames;
   }
 
+  const preserved = new Set(preserveNames);
   await Promise.allSettled(
-    names.map((name) => deleteDatabase(idb, name, timeoutMs)),
+    names
+      .filter((name) => !preserved.has(name))
+      .map((name) => deleteDatabase(idb, name, timeoutMs)),
   );
 }
 

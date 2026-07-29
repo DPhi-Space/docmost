@@ -1,11 +1,39 @@
+/**
+ * The phase-2/3 hook, tested against the arrangement it actually runs in.
+ *
+ * An earlier version of this file built `{ current: { remote } }` *inside* the
+ * `renderHook` callback, so every render minted a fresh bundle already matching
+ * the current props. A stale provider was structurally impossible — which is
+ * precisely the hazard the design exists to defeat, so the suite could not fail
+ * for the one reason that matters.
+ *
+ * What `page-editor.tsx` really does:
+ *
+ * - `providersRef` is **one stable object** for the life of the component; only
+ *   `.current` moves;
+ * - `.current` is swapped from an **effect**, i.e. out of band and after the
+ *   render that reads it — so the ref is null on the first pass and lags a
+ *   `pageId` change;
+ * - `connectionStatus` comes from the global `yjsConnectionStatusAtom`, which is
+ *   **never reset** when the page changes, so a new page inherits the old page's
+ *   `Connected`;
+ * - the document is a real `Y.Doc`, and its emptiness is now load-bearing.
+ *
+ * Every case below uses that shape. "does not vouch for a new page with the
+ * previous page's provider" is the probe that fails against a hook without the
+ * provenance check.
+ */
+
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 const markers = new Map<string, number>();
+const dirty = new Map<string, number>();
 
-// The real module opens IndexedDB, which jsdom does not implement. The store's
-// own semantics are covered by `sync-markers.test.ts`; here the map stands in
-// for the disk so the *hook's* read/write decisions are what is under test.
+// The real modules open IndexedDB, which jsdom does not implement. Their own
+// semantics are covered by `sync-markers.test.ts` and `dirty-pages.test.ts`;
+// here the maps stand in for the disk so the *hook's* decisions are under test.
 vi.mock("./sync-markers", () => ({
   hasPageRemoteSynced: vi.fn(async (pageId: string) => markers.has(pageId)),
   markPageRemoteSynced: vi.fn(async (pageId: string) => {
@@ -14,11 +42,6 @@ vi.mock("./sync-markers", () => ({
   clearPageSyncMarkers: vi.fn(async () => markers.clear()),
 }));
 
-const dirty = new Map<string, number>();
-
-// Same reasoning as the sync-marker stub above: the registry's own semantics
-// are `dirty-pages.test.ts`; here the map stands in for the disk so the hook's
-// record/clear *decisions* are what is under test.
 vi.mock("./dirty-pages", () => ({
   recordDirtyPage: vi.fn(async (pageId: string) => {
     dirty.set(pageId, (dirty.get(pageId) ?? 0) + 1);
@@ -29,8 +52,11 @@ vi.mock("./dirty-pages", () => ({
 import { markPageRemoteSynced } from "./sync-markers";
 import { clearDirtyPage, recordDirtyPage } from "./dirty-pages";
 import { getOpenPage, resetOpenPageForTests } from "./open-page-registry";
-import type { DocUpdateSource } from "./dirty-tracking";
-import { useOfflineEditGate, type RemoteSyncSource } from "./offline-edit-gate";
+import {
+  useOfflineEditGate,
+  UNSYNCED_POLL_MS,
+  type PageProviders,
+} from "./offline-edit-gate";
 import {
   OFFLINE_EDITING_STORAGE_KEY,
   setOfflineEditingEnabled,
@@ -49,32 +75,76 @@ function setOnline(online: boolean) {
   });
 }
 
-function fakeProvider(
-  overrides: Partial<RemoteSyncSource> = {},
-): RemoteSyncSource {
-  return { synced: false, unsyncedChanges: 0, ...overrides };
+/** The y-indexeddb instance, which exists here only as an update origin. */
+const localPersistence = { kind: "IndexeddbPersistence" };
+/** y-prosemirror commits editor changes with this as the transaction origin. */
+const editorOrigin = { key: "y-sync$" };
+
+interface BundleOptions {
+  synced?: boolean;
+  unsyncedChanges?: number;
+  /** False builds the empty shell an orphaned sync marker leaves behind. */
+  populated?: boolean;
 }
 
-function providersRef(remote: RemoteSyncSource | null, local?: unknown) {
-  return { current: remote ? { remote, local } : null };
-}
-
-/** A `Y.Doc` stand-in that lets a test emit updates with a chosen origin. */
-function fakeDoc() {
-  const handlers = new Set<(update: Uint8Array, origin: unknown) => void>();
-  const doc: DocUpdateSource = {
-    on: (_e, handler) => void handlers.add(handler),
-    off: (_e, handler) => void handlers.delete(handler),
-  };
-  return {
-    doc,
-    emit: (origin: unknown) => {
-      for (const handler of [...handlers]) handler(new Uint8Array(), origin);
+/**
+ * One provider bundle, as `page-editor.tsx` builds it: a real `Y.Doc`, the
+ * persistence instance, and the page it was constructed for.
+ */
+function bundleFor(pageId: string, options: BundleOptions = {}) {
+  const doc = new Y.Doc();
+  if (options.populated !== false) {
+    doc.getXmlFragment("default").insert(0, [new Y.XmlElement("paragraph")]);
+  }
+  const bundle: PageProviders = {
+    pageId,
+    local: localPersistence,
+    remote: {
+      synced: options.synced ?? false,
+      unsyncedChanges: options.unsyncedChanges ?? 0,
+      document: doc,
     },
   };
+  return { bundle, doc };
 }
 
-/** Let the marker read (a resolved promise) land. */
+/** The stable `providersRef`; `.current` is only ever assigned outside render. */
+function providersRef(initial: PageProviders | null = null) {
+  return { current: initial };
+}
+
+interface Props {
+  pageId: string;
+  connectionStatus: string;
+  isLocalSynced: boolean;
+}
+
+const PAGE_2: Props = {
+  pageId: "page-2",
+  connectionStatus: "connected",
+  isLocalSynced: true,
+};
+
+function mountGate(
+  providers: { current: PageProviders | null },
+  initial: Partial<Props> = {},
+) {
+  const props: Props = {
+    pageId: "page-1",
+    connectionStatus: "disconnected",
+    isLocalSynced: true,
+    ...initial,
+  };
+  return renderHook(
+    (p: Props) => ({
+      gate: useOfflineEditGate({ ...p, providers }),
+      state: useOfflineEditState(),
+    }),
+    { initialProps: props },
+  );
+}
+
+/** Let the marker read (a resolved promise) and the resulting render land. */
 async function settle() {
   await act(async () => {
     await Promise.resolve();
@@ -82,17 +152,31 @@ async function settle() {
   });
 }
 
-describe("useOfflineEditGate", () => {
-  beforeEach(() => {
-    markers.clear();
-    dirty.clear();
-    vi.clearAllMocks();
-    resetOpenPageForTests();
-    resetOfflineEditStateForTests();
-    localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
-    setOnline(true);
+/** Run one or more sampling ticks. Requires fake timers. */
+async function tick(times = 1) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(UNSYNCED_POLL_MS * times);
   });
+}
 
+function emitUpdate(doc: Y.Doc, origin: unknown) {
+  doc.transact(() => {
+    doc.getText("probe").insert(0, "x");
+  }, origin);
+}
+
+function reset() {
+  markers.clear();
+  dirty.clear();
+  vi.clearAllMocks();
+  resetOpenPageForTests();
+  resetOfflineEditStateForTests();
+  localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
+  setOnline(true);
+}
+
+describe("useOfflineEditGate — the offline editing gate", () => {
+  beforeEach(reset);
   afterEach(() => {
     vi.useRealTimers();
     setOnline(true);
@@ -101,238 +185,99 @@ describe("useOfflineEditGate", () => {
   it("stays closed and touches no storage while the switch is off", async () => {
     markers.set("page-1", 1);
     setOnline(false);
+    const { bundle } = bundleFor("page-1", { synced: true });
 
-    const { result } = renderHook(() =>
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider({ synced: true })),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      }),
-    );
+    const { result } = mountGate(providersRef(bundle), {
+      connectionStatus: "connected",
+    });
     await settle();
 
-    expect(result.current.canEditOffline).toBe(false);
+    expect(result.current.gate.canEditOffline).toBe(false);
     expect(markPageRemoteSynced).not.toHaveBeenCalled();
   });
 
-  it("opens for a marked page on an offline device", async () => {
+  it("opens for a marked, populated page on an offline device", async () => {
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
     setOnline(false);
+    const { bundle } = bundleFor("page-1");
 
-    const { result } = renderHook(() =>
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider()),
-        isLocalSynced: true,
-        connectionStatus: "disconnected",
-      }),
-    );
+    const { result } = mountGate(providersRef(bundle));
     await settle();
 
-    expect(result.current.canEditOffline).toBe(true);
+    expect(result.current.gate.canEditOffline).toBe(true);
   });
 
   it("stays closed offline for a page that was never synced here", async () => {
     setOfflineEditingEnabled(true);
     setOnline(false);
+    const { bundle } = bundleFor("never-opened");
 
-    const { result } = renderHook(() =>
-      useOfflineEditGate({
-        pageId: "never-opened",
-        providers: providersRef(fakeProvider()),
-        isLocalSynced: true,
-        connectionStatus: "disconnected",
-      }),
-    );
+    const { result } = mountGate(providersRef(bundle), {
+      pageId: "never-opened",
+    });
     await settle();
 
-    expect(result.current.canEditOffline).toBe(false);
+    expect(result.current.gate.canEditOffline).toBe(false);
   });
 
-  it("does not carry one page's permission over to the next", async () => {
-    // `PageEditor` is not remounted on navigation, so the hook is re-rendered
-    // with a new `pageId` while every piece of its state survives.
+  it("stays closed when the marker survives but the document does not", async () => {
+    // The defect: the marker store and `page.<pageId>` are separate databases
+    // and can disagree. Opening here gives a live, blank editor above the words
+    // "changes are saved locally and will sync when you reconnect".
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
     setOnline(false);
+    const { bundle } = bundleFor("page-1", { populated: false });
 
-    const { result, rerender } = renderHook(
-      (pageId: string) =>
-        useOfflineEditGate({
-          pageId,
-          providers: providersRef(fakeProvider()),
-          isLocalSynced: true,
-          connectionStatus: "disconnected",
-        }),
-      { initialProps: "page-1" },
-    );
-    await settle();
-    expect(result.current.canEditOffline).toBe(true);
-
-    rerender("page-2");
+    const { result } = mountGate(providersRef(bundle));
     await settle();
 
-    expect(result.current.canEditOffline).toBe(false);
+    expect(result.current.gate.canEditOffline).toBe(false);
   });
 
-  it("writes a marker once the provider itself reports a completed handshake", async () => {
-    setOfflineEditingEnabled(true);
-
-    renderHook(() =>
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider({ synced: true })),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      }),
-    );
-    await settle();
-
-    expect(markPageRemoteSynced).toHaveBeenCalledWith("page-1");
-  });
-
-  it("refuses to write a marker on a connection whose document has not synced", async () => {
-    // The exact hazard the provider is read through a ref for: a stale
-    // `Connected` status plus a provider that has not handshaked must not be
-    // mistaken for a real remote sync.
-    setOfflineEditingEnabled(true);
-
-    renderHook(() =>
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider({ synced: false })),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      }),
-    );
-    await settle();
-
-    expect(markPageRemoteSynced).not.toHaveBeenCalled();
-  });
-
-  it("refuses to write a marker while the socket is not connected", async () => {
-    setOfflineEditingEnabled(true);
-
-    renderHook(() =>
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider({ synced: true })),
-        isLocalSynced: true,
-        connectionStatus: "disconnected",
-      }),
-    );
-    await settle();
-
-    expect(markPageRemoteSynced).not.toHaveBeenCalled();
-  });
-
-  it("clears a page-unavailable report once the page syncs again", async () => {
-    setOfflineEditingEnabled(true);
-    reportPageUnavailable("page-1");
-
-    const { result } = renderHook(() => {
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider({ synced: true })),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      });
-      return useOfflineEditState();
-    });
-    await settle();
-
-    expect(result.current.unavailablePageId).toBeNull();
-  });
-
-  it("raises the warning when the provider's counter will not drain", async () => {
+  it("opens as soon as the emptied document is repopulated", async () => {
+    // The same page, once the replay actually delivers something: the gate
+    // closes on emptiness, it does not latch shut on a page.
     vi.useFakeTimers();
     setOfflineEditingEnabled(true);
-    const provider = fakeProvider({ synced: true, unsyncedChanges: 3 });
-
-    const { result } = renderHook(() => {
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(provider),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      });
-      return useOfflineEditState();
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS - 1_000);
-    });
-    expect(result.current.unsyncedChangesWarning).toBe(false);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
-    });
-    expect(result.current.unsyncedChangesWarning).toBe(true);
-  });
-
-  it("raises no warning while the counter drains normally", async () => {
-    vi.useFakeTimers();
-    setOfflineEditingEnabled(true);
-    const provider = { synced: true, unsyncedChanges: 0 };
-
-    const { result } = renderHook(() => {
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(provider),
-        isLocalSynced: true,
-        connectionStatus: "connected",
-      });
-      return useOfflineEditState();
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 3);
-    });
-
-    expect(result.current.unsyncedChangesWarning).toBe(false);
-  });
-
-  it("raises no warning for edits made while offline", async () => {
-    vi.useFakeTimers();
-    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
     setOnline(false);
-    const provider = fakeProvider({ synced: false, unsyncedChanges: 12 });
+    const { bundle, doc } = bundleFor("page-1", { populated: false });
 
-    const { result } = renderHook(() => {
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(provider),
-        isLocalSynced: true,
-        connectionStatus: "disconnected",
-      });
-      return useOfflineEditState();
+    const { result } = mountGate(providersRef(bundle));
+    await settle();
+    expect(result.current.gate.canEditOffline).toBe(false);
+
+    doc.getXmlFragment("default").insert(0, [new Y.XmlElement("paragraph")]);
+    await tick();
+
+    expect(result.current.gate.canEditOffline).toBe(true);
+  });
+
+  it("stays closed while y-indexeddb has not finished loading", async () => {
+    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
+    setOnline(false);
+    const { bundle } = bundleFor("page-1");
+
+    const { result } = mountGate(providersRef(bundle), {
+      isLocalSynced: false,
     });
+    await settle();
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 5);
-    });
-
-    expect(result.current.unsyncedChangesWarning).toBe(false);
+    expect(result.current.gate.canEditOffline).toBe(false);
   });
 
   it("publishes the offline-editing state the banner renders from", async () => {
     setOfflineEditingEnabled(true);
     markers.set("page-1", 1);
     setOnline(false);
+    const { bundle } = bundleFor("page-1");
 
-    const { result, unmount } = renderHook(() => {
-      useOfflineEditGate({
-        pageId: "page-1",
-        providers: providersRef(fakeProvider()),
-        isLocalSynced: true,
-        connectionStatus: "disconnected",
-      });
-      return useOfflineEditState();
-    });
+    const { result, unmount } = mountGate(providersRef(bundle));
     await settle();
-    expect(result.current.offlineEditingActive).toBe(true);
+    expect(result.current.state.offlineEditingActive).toBe(true);
 
     unmount();
 
@@ -342,69 +287,254 @@ describe("useOfflineEditGate", () => {
   });
 });
 
-describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
-  const local = { kind: "IndexeddbPersistence" };
-  const editor = { key: "y-sync$" };
-
-  beforeEach(() => {
-    markers.clear();
-    dirty.clear();
-    vi.clearAllMocks();
-    resetOpenPageForTests();
-    resetOfflineEditStateForTests();
-    localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
-    setOnline(true);
-  });
-
+describe("useOfflineEditGate — provenance", () => {
+  beforeEach(reset);
   afterEach(() => {
     vi.useRealTimers();
     setOnline(true);
   });
 
-  const mount = (
-    overrides: {
-      connectionStatus?: string;
-      synced?: boolean;
-      unsyncedChanges?: number;
-      pageId?: string;
-    } = {},
-  ) => {
-    const { doc, emit } = fakeDoc();
-    const remote: RemoteSyncSource = {
-      synced: overrides.synced ?? false,
-      unsyncedChanges: overrides.unsyncedChanges ?? 0,
-      document: doc,
-    };
-    const refs = providersRef(remote, local);
-    const view = renderHook(
-      (pageId: string) =>
-        useOfflineEditGate({
-          pageId,
-          providers: refs,
-          isLocalSynced: true,
-          connectionStatus: overrides.connectionStatus ?? "disconnected",
-        }),
-      { initialProps: overrides.pageId ?? "page-1" },
-    );
-    return { emit, view, remote, refs };
-  };
-
-  it("records a page the user edits while its provider is disconnected", async () => {
+  it("writes a marker once the provider itself reports a completed handshake", async () => {
     setOfflineEditingEnabled(true);
-    const { emit } = mount();
+    const { bundle } = bundleFor("page-1", { synced: true });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
     await settle();
 
-    act(() => emit(editor));
+    expect(markPageRemoteSynced).toHaveBeenCalledWith("page-1");
+  });
+
+  it("refuses to write a marker on a connection whose document has not synced", async () => {
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: false });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+    await settle();
+
+    expect(markPageRemoteSynced).not.toHaveBeenCalled();
+  });
+
+  it("refuses to write a marker while the socket is not connected", async () => {
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true });
+
+    mountGate(providersRef(bundle), { connectionStatus: "disconnected" });
+    await settle();
+
+    expect(markPageRemoteSynced).not.toHaveBeenCalled();
+  });
+
+  it("does not vouch for a new page with the previous page's provider", async () => {
+    // The probe. `page-editor.tsx` swaps the bundle from an effect, so between
+    // a `pageId` change and that swap the ref still holds the *old* page's
+    // provider — which reports `synced === true` — while the global connection
+    // atom still reads `connected` because nothing resets it. Acting then marks
+    // a page the server has never acknowledged.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true });
+    const providers = providersRef(bundle);
+
+    const { rerender } = mountGate(providers, { connectionStatus: "connected" });
+    await settle();
+    expect(markPageRemoteSynced).toHaveBeenCalledWith("page-1");
+
+    // Route change: props move, the ref does not.
+    rerender(PAGE_2);
+    await settle();
+    await tick(3);
+
+    expect(markPageRemoteSynced).not.toHaveBeenCalledWith("page-2");
+  });
+
+  it("does not forget a new page's unpushed edits off the old provider", async () => {
+    // Same hazard, worse consequence: `clearDirtyPage` on a page whose edits
+    // have never been pushed drops the only index of work that exists solely on
+    // this device.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 0 });
+    const providers = providersRef(bundle);
+
+    const { rerender } = mountGate(providers, { connectionStatus: "connected" });
+    await settle();
+
+    rerender(PAGE_2);
+    await settle();
+    await tick(3);
+
+    expect(clearDirtyPage).not.toHaveBeenCalledWith("page-2");
+  });
+
+  it("does not let the old page's content vouch for the new page", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
+    markers.set("page-2", 1);
+    setOnline(false);
+    const { bundle } = bundleFor("page-1");
+    const providers = providersRef(bundle);
+
+    const { result, rerender } = mountGate(providers);
+    await settle();
+    expect(result.current.gate.canEditOffline).toBe(true);
+
+    rerender({ ...PAGE_2, connectionStatus: "disconnected" });
+    await settle();
+    await tick(3);
+
+    // page-2's own providers have not been built yet, so nothing in hand is
+    // evidence that page-2's document holds anything.
+    expect(result.current.gate.canEditOffline).toBe(false);
+  });
+
+  it("acts again as soon as the matching provider arrives", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const providers = providersRef(bundleFor("page-1", { synced: true }).bundle);
+
+    const { rerender } = mountGate(providers, { connectionStatus: "connected" });
+    await settle();
+
+    rerender(PAGE_2);
+    await settle();
+    await tick();
+    expect(markPageRemoteSynced).not.toHaveBeenCalledWith("page-2");
+
+    // The provider effect finally runs.
+    providers.current = bundleFor("page-2", { synced: true }).bundle;
+    await tick();
+
+    expect(markPageRemoteSynced).toHaveBeenCalledWith("page-2");
+  });
+
+  it("does nothing at all while the ref is still empty", async () => {
+    // The first render of every mount: the hook runs before the effect that
+    // builds the providers.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
+    setOnline(false);
+
+    const { result } = mountGate(providersRef(null));
+    await settle();
+    await tick(2);
+
+    expect(result.current.gate.canEditOffline).toBe(false);
+    expect(markPageRemoteSynced).not.toHaveBeenCalled();
+  });
+
+  it("refuses a bundle that offers no provenance", async () => {
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true });
+    delete bundle.pageId;
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+    await settle();
+
+    expect(markPageRemoteSynced).not.toHaveBeenCalled();
+  });
+});
+
+describe("useOfflineEditGate — dropped writes and availability", () => {
+  beforeEach(reset);
+  afterEach(() => {
+    vi.useRealTimers();
+    setOnline(true);
+  });
+
+  it("clears a page-unavailable report once the page syncs again", async () => {
+    setOfflineEditingEnabled(true);
+    reportPageUnavailable("page-1");
+    const { bundle } = bundleFor("page-1", { synced: true });
+
+    const { result } = mountGate(providersRef(bundle), {
+      connectionStatus: "connected",
+    });
+    await settle();
+
+    expect(result.current.state.unavailablePageId).toBeNull();
+  });
+
+  it("raises the warning when the provider's counter will not drain", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 3 });
+
+    const { result } = mountGate(providersRef(bundle), {
+      connectionStatus: "connected",
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS - 1_000);
+    });
+    expect(result.current.state.unsyncedChangesWarning).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(result.current.state.unsyncedChangesWarning).toBe(true);
+  });
+
+  it("raises no warning while the counter drains normally", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 0 });
+
+    const { result } = mountGate(providersRef(bundle), {
+      connectionStatus: "connected",
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 3);
+    });
+
+    expect(result.current.state.unsyncedChangesWarning).toBe(false);
+  });
+
+  it("raises no warning for edits made while offline", async () => {
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    setOnline(false);
+    const { bundle } = bundleFor("page-1", {
+      synced: false,
+      unsyncedChanges: 12,
+    });
+
+    const { result } = mountGate(providersRef(bundle));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSYNCED_GRACE_MS * 5);
+    });
+
+    expect(result.current.state.unsyncedChangesWarning).toBe(false);
+  });
+});
+
+describe("useOfflineEditGate — dirty tracking", () => {
+  beforeEach(reset);
+  afterEach(() => {
+    vi.useRealTimers();
+    setOnline(true);
+  });
+
+  it("records a page the user edits while its provider is not connected", async () => {
+    setOfflineEditingEnabled(true);
+    const { bundle, doc } = bundleFor("page-1");
+
+    mountGate(providersRef(bundle));
+    await settle();
+    act(() => emitUpdate(doc, editorOrigin));
 
     expect(recordDirtyPage).toHaveBeenCalledWith("page-1", undefined);
   });
 
   it("records nothing while the switch is off", async () => {
-    // Phase 2's promise: off means no new behaviour, and no database created.
-    const { emit } = mount();
-    await settle();
+    const { bundle, doc } = bundleFor("page-1");
 
-    act(() => emit(editor));
+    mountGate(providersRef(bundle));
+    await settle();
+    act(() => emitUpdate(doc, editorOrigin));
 
     expect(recordDirtyPage).not.toHaveBeenCalled();
   });
@@ -413,27 +543,31 @@ describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
     // Otherwise every page merely *read* offline would queue for a background
     // sync — and, if locked, be reported to the user as blocked.
     setOfflineEditingEnabled(true);
-    const { emit } = mount();
-    await settle();
+    const { bundle, doc } = bundleFor("page-1");
 
-    act(() => emit(local));
+    mountGate(providersRef(bundle));
+    await settle();
+    act(() => emitUpdate(doc, localPersistence));
 
     expect(recordDirtyPage).not.toHaveBeenCalled();
   });
 
   it("records nothing while the page's own provider is connected", async () => {
     setOfflineEditingEnabled(true);
-    const { emit } = mount({ connectionStatus: "connected", synced: true });
-    await settle();
+    const { bundle, doc } = bundleFor("page-1", { synced: true });
 
-    act(() => emit(editor));
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+    await settle();
+    act(() => emitUpdate(doc, editorOrigin));
 
     expect(recordDirtyPage).not.toHaveBeenCalled();
   });
 
   it("clears the entry once a real handshake drains the counter", async () => {
     setOfflineEditingEnabled(true);
-    mount({ connectionStatus: "connected", synced: true, unsyncedChanges: 0 });
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 0 });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
     await settle();
 
     expect(clearDirtyPage).toHaveBeenCalledWith("page-1");
@@ -443,7 +577,9 @@ describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
     // The read-only signature: the server took the connection and dropped the
     // writes. Forgetting the page here would lose the only pointer to them.
     setOfflineEditingEnabled(true);
-    mount({ connectionStatus: "connected", synced: true, unsyncedChanges: 2 });
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 2 });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
     await settle();
 
     expect(clearDirtyPage).not.toHaveBeenCalled();
@@ -451,7 +587,9 @@ describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
 
   it("does not clear on a connected socket whose document has not synced", async () => {
     setOfflineEditingEnabled(true);
-    mount({ connectionStatus: "connected", synced: false, unsyncedChanges: 0 });
+    const { bundle } = bundleFor("page-1", { synced: false, unsyncedChanges: 0 });
+
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
     await settle();
 
     expect(clearDirtyPage).not.toHaveBeenCalled();
@@ -460,26 +598,27 @@ describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
   it("clears once per page rather than once per second", async () => {
     vi.useFakeTimers();
     setOfflineEditingEnabled(true);
-    mount({ connectionStatus: "connected", synced: true, unsyncedChanges: 0 });
+    const { bundle } = bundleFor("page-1", { synced: true, unsyncedChanges: 0 });
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
+    mountGate(providersRef(bundle), { connectionStatus: "connected" });
+    await tick(10);
 
     expect(clearDirtyPage).toHaveBeenCalledTimes(1);
   });
 
-  it("re-aims tracking at the new page after a navigation, exactly once", async () => {
-    // `PageEditor` is not remounted across navigation, so the subscription has
-    // to follow `pageId` — and a stale listener left behind would record the
-    // previous page a second time on every keystroke.
+  it("re-aims tracking at the new page once its provider arrives", async () => {
+    vi.useFakeTimers();
     setOfflineEditingEnabled(true);
-    const { emit, view } = mount();
+    const providers = providersRef(bundleFor("page-1").bundle);
+
+    const { rerender } = mountGate(providers);
     await settle();
 
-    view.rerender("page-2");
-    await settle();
-    act(() => emit(editor));
+    const second = bundleFor("page-2");
+    rerender({ ...PAGE_2, connectionStatus: "disconnected" });
+    providers.current = second.bundle;
+    await tick();
+    act(() => emitUpdate(second.doc, editorOrigin));
 
     expect(recordDirtyPage).toHaveBeenCalledTimes(1);
     expect(recordDirtyPage).toHaveBeenCalledWith("page-2", undefined);
@@ -487,57 +626,41 @@ describe("useOfflineEditGate — dirty tracking (phase 3)", () => {
 
   it("unsubscribes when the editor unmounts", async () => {
     setOfflineEditingEnabled(true);
-    const { emit, view } = mount();
+    const { bundle, doc } = bundleFor("page-1");
+
+    const { unmount } = mountGate(providersRef(bundle));
     await settle();
 
-    view.unmount();
-    emit(editor);
+    unmount();
+    emitUpdate(doc, editorOrigin);
 
     expect(recordDirtyPage).not.toHaveBeenCalled();
   });
 });
 
-describe("useOfflineEditGate — open-document claim (phase 3)", () => {
-  beforeEach(() => {
-    markers.clear();
-    dirty.clear();
-    resetOpenPageForTests();
-    resetOfflineEditStateForTests();
-    localStorage.removeItem(OFFLINE_EDITING_STORAGE_KEY);
-  });
-
-  const render = (pageId: string) =>
-    renderHook(
-      (id: string) =>
-        useOfflineEditGate({
-          pageId: id,
-          providers: providersRef(fakeProvider()),
-          isLocalSynced: true,
-          connectionStatus: "disconnected",
-        }),
-      { initialProps: pageId },
-    );
+describe("useOfflineEditGate — open-document claim", () => {
+  beforeEach(reset);
 
   it("claims the document the editor is showing, switch or no switch", () => {
-    // Unconditional on purpose: a missing claim would let the resync manager
-    // open a second provider on a document the editor already holds.
-    const { unmount } = render("page-1");
+    const { unmount } = mountGate(providersRef(bundleFor("page-1").bundle));
 
     expect(getOpenPage()).toBe("page-1");
     unmount();
   });
 
   it("follows the editor across a navigation", () => {
-    const { rerender, unmount } = render("page-1");
+    const { rerender, unmount } = mountGate(
+      providersRef(bundleFor("page-1").bundle),
+    );
 
-    rerender("page-2");
+    rerender({ ...PAGE_2, connectionStatus: "disconnected" });
 
     expect(getOpenPage()).toBe("page-2");
     unmount();
   });
 
   it("releases the document when the editor unmounts", () => {
-    const { unmount } = render("page-1");
+    const { unmount } = mountGate(providersRef(bundleFor("page-1").bundle));
 
     unmount();
 

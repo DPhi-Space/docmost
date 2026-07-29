@@ -23,9 +23,14 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { IPage } from "@/features/page/types/page.types";
+import type { ICurrentUser } from "@/features/user/types/user.types";
 import { setDirtyPageLinkResolver } from "./dirty-page-link";
 import { createResyncManager, type ResyncManager } from "./resync-manager";
 import { resetResyncState } from "./resync-state";
+import {
+  reconcilePendingRecovery,
+  rememberOfflineDataOwner,
+} from "./session-expiry";
 
 /**
  * Guards against a second manager if the shell is ever mounted twice (React
@@ -52,6 +57,24 @@ export function useOfflineResync(enabled: boolean): void {
       queryClient.getQueryData<IPage>(["pages", pageId]),
     );
     return () => setDirtyPageLinkResolver(null);
+  }, [queryClient, enabled]);
+
+  /**
+   * Two jobs the 401 path cannot do for itself, both needing an identity the
+   * axios interceptor has no way to reach.
+   *
+   * Recording the owner is what later lets `reconcilePendingRecovery` tell "the
+   * same person signed back in" from "this browser changed hands" — the
+   * distinction #18's shared-machine concern actually turns on, made at the one
+   * moment it is knowable.
+   */
+  useEffect(() => {
+    if (!enabled) return;
+    const userId = queryClient.getQueryData<ICurrentUser>(["currentUser"])?.user
+      ?.id;
+    if (!userId) return;
+    rememberOfflineDataOwner(userId);
+    void reconcilePendingRecovery(userId);
   }, [queryClient, enabled]);
 
   useEffect(() => {

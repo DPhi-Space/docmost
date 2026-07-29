@@ -7,123 +7,82 @@ import {
 /**
  * The safety invariant, enumerated rather than sampled.
  *
- * Every one of the sixteen combinations is listed, because the property that
- * matters is not "the happy path works" — it is that *fifteen* of them refuse.
- * In particular the row that must never flip is `hasSyncedBefore: false`: a
- * document that has never completed a real remote sync is never editable, which
- * is what keeps this out of the class of upstream's data-loss regression
- * (docmost#2353).
+ * Every one of the thirty-two combinations is generated, because the property
+ * that matters is not "the happy path works" — it is that *thirty-one* of them
+ * refuse. Two rows carry the weight:
+ *
+ * - `hasSyncedBefore: false` — a document that has never completed a real
+ *   remote sync is never editable, which is what keeps this out of the class of
+ *   upstream's data-loss regression (docmost#2353);
+ * - `hasLocalContent: false` — a marker whose `page.<pageId>` database has gone
+ *   missing must not open a live, blank editor claiming the user's changes are
+ *   saved locally.
+ *
+ * There is deliberately no "agrees with its specification" case restating the
+ * boolean expression: a test that re-implements the implementation cannot fail
+ * for any reason worth knowing about.
  */
 const ALL = [false, true];
 
-function expected(input: OfflineEditGateInput): boolean {
-  return (
-    input.featureEnabled &&
-    input.isLocalSynced &&
-    input.hasSyncedBefore &&
-    !input.isOnline
-  );
-}
-
-describe("canEditWithoutConnection", () => {
-  it("permits exactly one combination out of sixteen", () => {
-    const permitted: OfflineEditGateInput[] = [];
-    for (const featureEnabled of ALL)
-      for (const isLocalSynced of ALL)
-        for (const hasSyncedBefore of ALL)
-          for (const isOnline of ALL) {
-            const input = {
+function everyCombination(): OfflineEditGateInput[] {
+  const rows: OfflineEditGateInput[] = [];
+  for (const featureEnabled of ALL)
+    for (const isLocalSynced of ALL)
+      for (const hasSyncedBefore of ALL)
+        for (const hasLocalContent of ALL)
+          for (const isOnline of ALL)
+            rows.push({
               featureEnabled,
               isLocalSynced,
               hasSyncedBefore,
+              hasLocalContent,
               isOnline,
-            };
-            if (canEditWithoutConnection(input)) permitted.push(input);
-          }
+            });
+  return rows;
+}
 
-    expect(permitted).toEqual([
-      {
-        featureEnabled: true,
-        isLocalSynced: true,
-        hasSyncedBefore: true,
-        isOnline: false,
-      },
-    ]);
+const PERMITTED: OfflineEditGateInput = {
+  featureEnabled: true,
+  isLocalSynced: true,
+  hasSyncedBefore: true,
+  hasLocalContent: true,
+  isOnline: false,
+};
+
+describe("canEditWithoutConnection", () => {
+  it("enumerates thirty-two combinations", () => {
+    expect(everyCombination()).toHaveLength(32);
+  });
+
+  it("permits exactly one of them", () => {
+    const permitted = everyCombination().filter(canEditWithoutConnection);
+
+    expect(permitted).toEqual([PERMITTED]);
   });
 
   it.each([
-    [
-      "the switch is off",
-      {
-        featureEnabled: false,
-        isLocalSynced: true,
-        hasSyncedBefore: true,
-        isOnline: false,
-      },
-    ],
-    [
-      "y-indexeddb has not loaded the document yet",
-      {
-        featureEnabled: true,
-        isLocalSynced: false,
-        hasSyncedBefore: true,
-        isOnline: false,
-      },
-    ],
-    [
-      "the page has never completed a real remote sync",
-      {
-        featureEnabled: true,
-        isLocalSynced: true,
-        hasSyncedBefore: false,
-        isOnline: false,
-      },
-    ],
-    [
-      "the browser believes it is online",
-      {
-        featureEnabled: true,
-        isLocalSynced: true,
-        hasSyncedBefore: true,
-        isOnline: true,
-      },
-    ],
-    [
-      "nothing at all is true",
-      {
-        featureEnabled: false,
-        isLocalSynced: false,
-        hasSyncedBefore: false,
-        isOnline: true,
-      },
-    ],
-  ])("refuses when %s", (_why, input) => {
-    expect(canEditWithoutConnection(input)).toBe(false);
+    ["the switch is off", { featureEnabled: false }],
+    ["y-indexeddb has not loaded the document yet", { isLocalSynced: false }],
+    ["the page has never completed a real remote sync", { hasSyncedBefore: false }],
+    ["the local document is an empty shell", { hasLocalContent: false }],
+    ["the browser believes it is online", { isOnline: true }],
+  ])("refuses when %s, with everything else in its favour", (_why, override) => {
+    expect(canEditWithoutConnection({ ...PERMITTED, ...override })).toBe(false);
   });
 
-  it("permits a previously-synced page on an offline device with the switch on", () => {
+  it("refuses when nothing at all is true", () => {
     expect(
       canEditWithoutConnection({
-        featureEnabled: true,
-        isLocalSynced: true,
-        hasSyncedBefore: true,
-        isOnline: false,
+        featureEnabled: false,
+        isLocalSynced: false,
+        hasSyncedBefore: false,
+        hasLocalContent: false,
+        isOnline: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("agrees with its specification on every input", () => {
-    for (const featureEnabled of ALL)
-      for (const isLocalSynced of ALL)
-        for (const hasSyncedBefore of ALL)
-          for (const isOnline of ALL) {
-            const input = {
-              featureEnabled,
-              isLocalSynced,
-              hasSyncedBefore,
-              isOnline,
-            };
-            expect(canEditWithoutConnection(input)).toBe(expected(input));
-          }
+  it("permits a previously-synced, populated page on an offline device", () => {
+    expect(canEditWithoutConnection(PERMITTED)).toBe(true);
   });
 });

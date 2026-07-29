@@ -144,12 +144,16 @@ describe("clearOfflineData", () => {
   let stopPersistingQueryCache: Mock<() => void>;
   let clearPageSyncMarkers: Mock<() => Promise<void>>;
   let clearDirtyPages: Mock<() => Promise<void>>;
+  let clearPageSyncMarkersExcept: Mock<(keep: readonly string[]) => Promise<void>>;
 
   beforeEach(() => {
     deletePersistedQueryCache = vi.fn<() => Promise<void>>(async () => {});
     stopPersistingQueryCache = vi.fn<() => void>();
     clearPageSyncMarkers = vi.fn<() => Promise<void>>(async () => {});
     clearDirtyPages = vi.fn<() => Promise<void>>(async () => {});
+    clearPageSyncMarkersExcept = vi.fn<(keep: readonly string[]) => Promise<void>>(
+      async () => {},
+    );
   });
 
   afterEach(() => {
@@ -162,6 +166,7 @@ describe("clearOfflineData", () => {
       stopPersistingQueryCache,
       clearPageSyncMarkers,
       clearDirtyPages,
+      clearPageSyncMarkersExcept,
       ...overrides,
     });
 
@@ -241,6 +246,72 @@ describe("clearOfflineData", () => {
     await run({ indexedDB: null, caches: null });
 
     expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the page databases named for preservation, and only those", async () => {
+    // The 401 path (`session-expiry.ts`). These databases can hold the only
+    // copy of the user's work; every other one is a cache and still goes.
+    const { factory, deleted } = fakeIndexedDB({
+      databases: ["page.keep", "page.drop", "docmost-offline"],
+    });
+
+    await run({
+      indexedDB: factory,
+      caches: null,
+      preservePageIds: ["keep"],
+      preserveDirtyPages: true,
+    });
+
+    expect(deleted).toEqual(["page.drop"]);
+  });
+
+  it("narrows the sync markers to exactly the preserved pages", async () => {
+    // A marker whose document has just been deleted is the "marker without
+    // content" state the gate refuses to act on; the two move together.
+    const { factory } = fakeIndexedDB({ databases: ["page.keep"] });
+
+    await run({
+      indexedDB: factory,
+      caches: null,
+      preservePageIds: ["keep"],
+      preserveDirtyPages: true,
+    });
+
+    expect(clearPageSyncMarkersExcept).toHaveBeenCalledWith(["keep"]);
+    expect(clearPageSyncMarkers).not.toHaveBeenCalled();
+    expect(clearDirtyPages).not.toHaveBeenCalled();
+  });
+
+  it("deletes every page database when nothing is named", async () => {
+    // The explicit-logout path, unchanged.
+    const { factory, deleted } = fakeIndexedDB({
+      databases: ["page.a", "page.b"],
+    });
+
+    await run({ indexedDB: factory, caches: null });
+
+    expect(deleted).toEqual(["page.a", "page.b"]);
+    expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+    expect(clearDirtyPages).toHaveBeenCalledOnce();
+  });
+
+  it("still erases the runtime caches and the query cache while preserving", async () => {
+    // Preservation is narrow: only what is needed to recover the edits.
+    const { factory } = fakeIndexedDB({ databases: ["page.keep"] });
+    const { storage, deleted } = fakeCaches(["docmost-offline-files-v1"]);
+    const queryClient = fakeQueryClient();
+
+    await run({
+      indexedDB: factory,
+      caches: storage,
+      queryClient,
+      preservePageIds: ["keep"],
+      preserveDirtyPages: true,
+    });
+
+    expect(deleted).toEqual(["docmost-offline-files-v1"]);
+    expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
+    expect(queryClient.clear).toHaveBeenCalledOnce();
   });
 
   it("clears the phase-3 dirty-page registry and its blocked list", async () => {

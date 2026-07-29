@@ -55,7 +55,11 @@ import {
 import { isOfflineEditingEnabled } from "./offline-editing-settings";
 import { getOpenPage } from "./open-page-registry";
 import { openResyncSession } from "./resync-session";
-import { resyncPage, type PageResyncOutcome } from "./resync-page";
+import {
+  resyncPage,
+  type PageResyncOutcome,
+  type ResyncPageDeps,
+} from "./resync-page";
 import { setResyncState } from "./resync-state";
 
 /** The Web Locks name; shared by every tab of this origin. */
@@ -112,6 +116,13 @@ export interface ResyncManagerDeps {
   setTimer: (fn: () => void, ms: number) => number;
   clearTimer: (handle: number) => void;
   log: (message: string, detail?: unknown) => void;
+  /**
+   * The per-page dependency bundle `resyncOnePage` is built from. Present only
+   * on the production wiring (`createDefaultResyncDeps`), where it exists so a
+   * test can inspect the parts — `shouldAbort` above all — that are otherwise
+   * sealed inside a closure.
+   */
+  perPageDeps?: () => ResyncPageDeps;
 }
 
 /**
@@ -235,7 +246,7 @@ export interface ResyncManager {
 export function createResyncManager(
   overrides: Partial<ResyncManagerDeps> = {},
 ): ResyncManager {
-  const deps: ResyncManagerDeps = { ...defaultDeps(), ...overrides };
+  const deps: ResyncManagerDeps = { ...createDefaultResyncDeps(), ...overrides };
 
   let stopped = false;
   let running = false;
@@ -343,7 +354,7 @@ async function fetchCollabToken(): Promise<string | undefined> {
  * decline, and is reported as `undefined` so the caller can tell it apart from
  * a pass that ran and found nothing.
  */
-async function withWebLock<T>(
+export async function withWebLock<T>(
   name: string,
   run: () => Promise<T>,
 ): Promise<T | undefined> {
@@ -354,21 +365,37 @@ async function withWebLock<T>(
   ) as Promise<T | undefined>;
 }
 
-function defaultDeps(): ResyncManagerDeps {
+/**
+ * The production wiring, exported so it can be *tested* rather than merely
+ * written.
+ *
+ * Every test in this file that supplies its own dependencies proves something
+ * about the loop and nothing about how the loop is connected to the app. That
+ * gap is real: replacing `isEnabled` with `() => true` here would bypass the
+ * kill switch, and replacing either open-page hook with `() => null` would let
+ * the manager open a second provider on the page the user is reading — and a
+ * suite that never touches this function stays green through both.
+ */
+export function createDefaultResyncDeps(): ResyncManagerDeps {
+  const perPageDeps = (): ResyncPageDeps => ({
+    openSession: openResyncSession,
+    getToken: fetchCollabToken,
+    isTokenExpired: (token) => isCollabTokenExpired(token),
+    // Re-read on every poll, not captured: the user can navigate into a page
+    // while it is being pushed.
+    shouldAbort: (id) => getOpenPage() === id,
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: () => Date.now(),
+  });
+
   return {
     listDirtyPages,
     clearDirtyPage,
     markDirtyPageBlocked,
     getOpenPage,
-    resyncOnePage: (pageId) =>
-      resyncPage(pageId, {
-        openSession: openResyncSession,
-        getToken: fetchCollabToken,
-        isTokenExpired: (token) => isCollabTokenExpired(token),
-        shouldAbort: (id) => getOpenPage() === id,
-        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        now: () => Date.now(),
-      }),
+    resyncOnePage: (pageId) => resyncPage(pageId, perPageDeps()),
+    /** Exposed for the wiring test; not part of `ResyncManagerDeps`. */
+    perPageDeps,
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
     isOnline: () => globalThis.navigator?.onLine !== false,

@@ -145,15 +145,19 @@ describe("nextUnsyncedState", () => {
     expect(fold([live(-1, 0), live(-1, 60_000)]).warned).toBe(false);
   });
 
-  it("defaults to a ten second grace period", () => {
-    expect(UNSYNCED_GRACE_MS).toBe(10_000);
-
-    const state = nextUnsyncedState({ pendingSince: 0, warned: false }, {
+  it("waits the full grace period, to the millisecond, before warning", () => {
+    // Written with literals rather than `UNSYNCED_GRACE_MS` on both sides: an
+    // assertion that the constant equals itself cannot fail, and the boundary
+    // is the only part of this worth pinning. Shortening the grace would make
+    // ordinary slow saves look like dropped writes.
+    const pending = { pendingSince: 0, warned: false };
+    const sample = (now: number) => ({
       hasLiveSync: true,
       unsyncedChanges: 1,
-      now: UNSYNCED_GRACE_MS,
+      now,
     });
 
-    expect(state.warned).toBe(true);
+    expect(nextUnsyncedState(pending, sample(9_999)).warned).toBe(false);
+    expect(nextUnsyncedState(pending, sample(10_000)).warned).toBe(true);
   });
 });

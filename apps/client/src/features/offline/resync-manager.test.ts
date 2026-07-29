@@ -84,9 +84,14 @@ describe("nextRetryDelayMs", () => {
     expect(nextRetryDelayMs(0)).toBe(RESYNC_RETRY_SCHEDULE_MS[0]);
   });
 
-  it("increases monotonically", () => {
-    const delays = RESYNC_RETRY_SCHEDULE_MS.map((_, i) => nextRetryDelayMs(i + 1));
-    expect(delays).toEqual([...delays].sort((a, b) => a - b));
+  it("is the documented schedule, stated here rather than read back", () => {
+    // Asserting that the module's own array is sorted proves nothing about the
+    // schedule anyone actually experiences. These are the numbers: a fast first
+    // retry for a reconnect that flapped, a ten-minute ceiling for a device
+    // that has failed five passes.
+    expect([1, 2, 3, 4, 5, 6, 20].map(nextRetryDelayMs)).toEqual([
+      5_000, 15_000, 60_000, 180_000, 600_000, 600_000, 600_000,
+    ]);
   });
 });
 
