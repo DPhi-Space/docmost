@@ -142,10 +142,12 @@ function fakeQueryClient(keys: readonly unknown[][] = []) {
 describe("clearOfflineData", () => {
   let deletePersistedQueryCache: Mock<() => Promise<void>>;
   let stopPersistingQueryCache: Mock<() => void>;
+  let clearPageSyncMarkers: Mock<() => Promise<void>>;
 
   beforeEach(() => {
     deletePersistedQueryCache = vi.fn<() => Promise<void>>(async () => {});
     stopPersistingQueryCache = vi.fn<() => void>();
+    clearPageSyncMarkers = vi.fn<() => Promise<void>>(async () => {});
   });
 
   afterEach(() => {
@@ -156,6 +158,7 @@ describe("clearOfflineData", () => {
     clearOfflineData({
       deletePersistedQueryCache,
       stopPersistingQueryCache,
+      clearPageSyncMarkers,
       ...overrides,
     });
 
@@ -226,6 +229,36 @@ describe("clearOfflineData", () => {
 
     // Clearing first would have emptied the cache the fallback reads from.
     expect(deleted).toEqual(["page.uuid-1"]);
+    expect(queryClient.clear).toHaveBeenCalledOnce();
+  });
+
+  it("clears the phase-2 page sync markers", async () => {
+    // Left behind, they would tell the next user of this browser which pages
+    // the previous one was allowed to sync — and hand them an offline editor.
+    await run({ indexedDB: null, caches: null });
+
+    expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+  });
+
+  it("clears the sync markers even when the query cache deletion fails", async () => {
+    deletePersistedQueryCache.mockRejectedValue(new Error("quota"));
+
+    await expect(run({ indexedDB: null, caches: null })).resolves.toBeUndefined();
+
+    expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+  });
+
+  it("still erases everything else when the sync markers cannot be cleared", async () => {
+    clearPageSyncMarkers.mockRejectedValue(new Error("blocked"));
+    const { storage, deleted } = fakeCaches(["docmost-offline-files-v1"]);
+    const queryClient = fakeQueryClient();
+
+    await expect(
+      run({ indexedDB: null, caches: storage, queryClient }),
+    ).resolves.toBeUndefined();
+
+    expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
+    expect(deleted).toEqual(["docmost-offline-files-v1"]);
     expect(queryClient.clear).toHaveBeenCalledOnce();
   });
 

@@ -10,7 +10,10 @@
  *    gap that has always outlived logout, and one that persisting REST content
  *    makes considerably more visible;
  * 3. the service worker's runtime caches, which include `GET /api/files/*`
- *    responses, i.e. attachments.
+ *    responses, i.e. attachments;
+ * 4. the phase-2 per-page sync markers, which record which pages this user was
+ *    allowed to sync — both a small disclosure and, left behind, a way for the
+ *    next user of the browser to be handed an offline editor on them.
  *
  * Called from both exits of an authenticated session: the explicit
  * `handleLogout` and the 401 handler's `redirectToLogin`. Both end in a
@@ -24,6 +27,7 @@ import {
   deletePersistedQueryCache,
   stopPersistingQueryCache,
 } from "./persisted-store";
+import { clearPageSyncMarkers } from "./sync-markers";
 
 /** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
 const PAGE_DB_PREFIX = "page.";
@@ -51,6 +55,8 @@ export interface ClearOfflineDataDeps {
   caches?: CacheStorage | null;
   deletePersistedQueryCache?: () => Promise<void>;
   stopPersistingQueryCache?: () => void;
+  /** Phase 2's per-page "has completed a real remote sync" markers. */
+  clearPageSyncMarkers?: () => Promise<void>;
   deleteTimeoutMs?: number;
 }
 
@@ -117,6 +123,7 @@ export async function clearOfflineData(
     caches: cacheStorage = globalThis.caches,
     deletePersistedQueryCache: deleteCache = deletePersistedQueryCache,
     stopPersistingQueryCache: stopPersisting = stopPersistingQueryCache,
+    clearPageSyncMarkers: clearMarkers = clearPageSyncMarkers,
     deleteTimeoutMs = DEFAULT_DELETE_TIMEOUT_MS,
   } = deps;
 
@@ -132,6 +139,7 @@ export async function clearOfflineData(
 
   await Promise.allSettled([
     deleteCache(),
+    clearMarkers(),
     deletePageDatabases(idb, fallbackNames, deleteTimeoutMs),
     deleteRuntimeCaches(cacheStorage),
   ]);
