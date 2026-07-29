@@ -22,11 +22,70 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { IPage } from "@/features/page/types/page.types";
 import type { ICurrentUser } from "@/features/user/types/user.types";
+import { getMyInfo } from "@/features/user/services/user-service";
 import { reconcileOfflineDataOwnership } from "./data-ownership";
 import { setDirtyPageLinkResolver } from "./dirty-page-link";
 import { createResyncManager, type ResyncManager } from "./resync-manager";
 import { resetResyncState } from "./resync-state";
 import { clearPendingRecovery, rememberOfflineDataOwner } from "./session-expiry";
+
+/**
+ * Who is *actually* signed in, asked of the server.
+ *
+ * **The cached user is not proof of identity.** Phase 1b persists
+ * `["currentUser"]` to disk and `UserProvider` renders from it immediately —
+ * which is what makes the app usable offline, and exactly why it cannot settle
+ * ownership. The audit's third leak trigger survived a first attempt at this
+ * fix for that reason: the next user signed in, the app booted holding the
+ * *previous* user's identity in a restored cache, and the mismatch was never
+ * seen. Nor can the fix be "wait for the app to refetch": the app's defaults
+ * are `refetchOnMount: false` with a five-minute `staleTime`, and a browser run
+ * confirmed `/users/me` is **not** requested at all on a boot with a warm
+ * cache.
+ *
+ * So this asks, once per authenticated mount, with a **direct service call**.
+ * Deliberately not `queryClient.fetchQuery(["currentUser"])`: that rewrites the
+ * shared query's options, and a first attempt using it with `staleTime: 0` set
+ * the app refetching `/users/me` and `/auth/collab-token` in a loop — six and
+ * seven times in a sixty-second window in a browser run — which broke the very
+ * recovery this is meant to protect. Ownership is this module's question and it
+ * asks it on its own behalf.
+ *
+ * A 401 answer routes into the ordinary session-expiry path, which is correct:
+ * the session really has ended.
+ *
+ * With no network, the cached user is used: signing in requires the server, so
+ * nobody can have become a different user since the cache was written.
+ */
+async function resolveCurrentUserId(
+  queryClient: ReturnType<typeof useQueryClient>,
+): Promise<string | null> {
+  const cached = () =>
+    queryClient.getQueryData<ICurrentUser>(["currentUser"])?.user?.id ?? null;
+
+  // Asking while offline is pointless and the answer is knowable: nobody can
+  // have signed in without the server, so the cached user is the only user.
+  if (globalThis.navigator?.onLine === false) return cached();
+
+  try {
+    const me = await getMyInfo();
+    return me?.user?.id ?? null;
+  } catch {
+    /**
+     * **No fallback to the cache here.** Online, the server is the only
+     * authority on who is signed in, and a failed request means "I cannot
+     * tell" — which must refuse, not guess. Falling back was observed to guess
+     * *wrong* in a browser run: the request lost a race with the new session,
+     * the restored cache answered with the previous user, ownership settled as
+     * "ours", and the resync manager pushed that user's document under the new
+     * user's cookie before the second, correct reconcile erased it.
+     *
+     * Refusing costs nothing here: nothing is erased, the readers stay closed,
+     * and the next mount asks again.
+     */
+    return null;
+  }
+}
 
 /**
  * Settle whose offline data is on this disk, before anything can read it.
@@ -35,31 +94,39 @@ import { clearPendingRecovery, rememberOfflineDataOwner } from "./session-expiry
  * resolves, `offlineDataIsOurs()` is false and both the editing gate and the
  * resync manager refuse. Erasing on mismatch and refusing until proof are two
  * halves of one answer — the audit showed that either alone has holes.
- *
- * The current user is read from the query cache rather than a hook so that a
- * cache restored from disk counts: an offline boot must be able to settle
- * ownership too.
  */
 export function useOfflineDataOwnership(): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    const userId = queryClient.getQueryData<ICurrentUser>(["currentUser"])?.user
-      ?.id;
-    if (!userId) return;
+    let cancelled = false;
 
-    // The hint the 401 handler will read. Recorded unconditionally, because a
-    // session whose owner was never recorded is a session whose work cannot be
-    // preserved at all (`session-expiry.ts` refuses rather than guessing).
-    rememberOfflineDataOwner(userId);
+    void (async () => {
+      const userId = await resolveCurrentUserId(queryClient);
+      if (cancelled) return;
 
-    void reconcileOfflineDataOwnership(userId).then((outcome) => {
+      if (!userId) {
+        // Refuse, and keep refusing, until an identity can be established.
+        void reconcileOfflineDataOwnership(null);
+        return;
+      }
+
+      // The hint the 401 handler will read. Recorded unconditionally, because a
+      // session whose owner was never recorded is a session whose work cannot
+      // be preserved at all (`session-expiry.ts` refuses rather than guessing).
+      rememberOfflineDataOwner(userId);
+
+      const outcome = await reconcileOfflineDataOwnership(userId);
       // The login-page notice has done its job once the owner is settled. It is
-      // deliberately consumed *here* and not used as the trigger for anything:
-      // treating "the notice is gone" as "the data is settled" was one of the
-      // three ways the leak was reached.
+      // consumed *here* and used as the trigger for nothing: treating "the
+      // notice is gone" as "the data is settled" was one of the three ways the
+      // leak was reached.
       if (outcome !== "deferred") clearPendingRecovery();
-    });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [queryClient]);
 }
 

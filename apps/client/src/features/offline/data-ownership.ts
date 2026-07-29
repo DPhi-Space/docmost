@@ -57,7 +57,21 @@ export type OwnershipStatus =
   | "ours";
 
 let status: OwnershipStatus = "unknown";
+/** Who reconciliation last settled for; the readers compare against this. */
+let settledUserId: string | null = null;
 const listeners = new Set<() => void>();
+
+/**
+ * The identity the current verdict was reached for.
+ *
+ * Published so that readers can check ownership **against the store the work
+ * lives in**, rather than trusting this module's boolean. The boolean is a
+ * cache of an answer; the stamp in the dirty-page store is the answer, and it
+ * cannot be out of step with the records beside it.
+ */
+export function getSettledUserId(): string | null {
+  return settledUserId;
+}
 
 export function getOwnershipStatus(): OwnershipStatus {
   return status;
@@ -77,6 +91,19 @@ function setStatus(next: OwnershipStatus): void {
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/**
+ * Notified whenever the verdict changes.
+ *
+ * The resync manager needs this, not just the value: its first pass runs the
+ * moment it is created, which is *before* reconciliation has had time to ask
+ * the server who is signed in. Without a nudge the pass returns empty, the
+ * schedule books its next attempt a minute later, and a user who has just
+ * recovered a session watches nothing happen. Observed in a browser.
+ */
+export function subscribeOwnership(listener: () => void): () => void {
+  return subscribe(listener);
 }
 
 export function useOfflineDataIsOurs(): boolean {
@@ -121,6 +148,8 @@ export async function reconcileOfflineDataOwnership(
     clearOfflineData: clear = clearOfflineData,
   } = deps;
 
+  settledUserId = currentUserId ?? null;
+
   if (!currentUserId) {
     // No identity yet, so no claim can be proved *or* disproved. Erasing here
     // would destroy the signed-in user's own pending work every time the user
@@ -155,5 +184,6 @@ export async function reconcileOfflineDataOwnership(
 /** Test seam: module state has to be resettable between cases. */
 export function resetOwnershipForTests(): void {
   status = "unknown";
+  settledUserId = null;
   for (const listener of listeners) listener();
 }

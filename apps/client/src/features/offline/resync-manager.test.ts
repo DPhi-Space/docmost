@@ -62,6 +62,9 @@ function harness(
     isEnabled: () => true,
     isOnline: () => true,
     offlineDataIsOurs: () => true,
+    subscribeOwnership: () => () => {},
+    readOfflineDataOwner: async () => ({ status: 'none' }) as const,
+    currentUserId: () => 'user-1',
     now: () => 1_000,
     publish: (next) => void published.push(next as Record<string, unknown>),
     setTimer: (fn, ms) => timers.push({ fn, ms }),
@@ -192,6 +195,48 @@ describe("runResyncPass", () => {
     const onTimer = harness([blocked]);
     await runResyncPass("periodic", onTimer.deps);
     expect(onTimer.attempted).toEqual([]);
+  });
+
+  it("refuses when the registry's own stamp names another user", async () => {
+    // The check that survives a stale verdict: a browser run caught a pass
+    // pushing the previous user's document because the cached boolean had been
+    // opened while the erase behind it was still in flight.
+    const h = harness([record("a")], {}, {
+      readOfflineDataOwner: async () => ({
+        status: "known",
+        ownerUserId: "someone-else",
+      }),
+      currentUserId: () => "user-1",
+    });
+
+    const summary = await runResyncPass("online", h.deps);
+
+    expect(h.attempted).toEqual([]);
+    expect(summary.attempted).toBe(0);
+  });
+
+  it("pushes when the registry's stamp is this user's", async () => {
+    const h = harness([record("a")], {}, {
+      readOfflineDataOwner: async () => ({
+        status: "known",
+        ownerUserId: "user-1",
+      }),
+      currentUserId: () => "user-1",
+    });
+
+    await runResyncPass("online", h.deps);
+
+    expect(h.attempted).toEqual(["a"]);
+  });
+
+  it("refuses when the owner stamp cannot be read", async () => {
+    const h = harness([record("a")], {}, {
+      readOfflineDataOwner: async () => ({ status: "unreadable" }),
+    });
+
+    await runResyncPass("online", h.deps);
+
+    expect(h.attempted).toEqual([]);
   });
 
   it("refuses to push anything the browser cannot prove is ours", async () => {
@@ -377,6 +422,47 @@ describe("createResyncManager", () => {
     manager.stop();
 
     expect(maxInFlight).toBe(1);
+  });
+
+  it("runs again the moment ownership is settled", async () => {
+    // The boot pass fires before reconciliation has asked the server who is
+    // signed in, so it returns empty. Without this nudge the next attempt is a
+    // whole idle interval away and a recovered session appears to do nothing.
+    let ours = false;
+    let notify: (() => void) | null = null;
+    const h = harness([record("a")], {}, {
+      offlineDataIsOurs: () => ours,
+      subscribeOwnership: (listener) => {
+        notify = listener;
+        return () => {
+          notify = null;
+        };
+      },
+    });
+
+    const manager = createResyncManager(h.deps);
+    await vi.waitFor(() => expect(h.timers.length).toBeGreaterThan(0));
+    expect(h.attempted).toEqual([]);
+
+    ours = true;
+    notify!();
+    await vi.waitFor(() => expect(h.attempted).toEqual(["a"]));
+    manager.stop();
+  });
+
+  it("stops listening for ownership once stopped", async () => {
+    let unsubscribed = false;
+    const h = harness([record("a")], {}, {
+      subscribeOwnership: () => () => {
+        unsubscribed = true;
+      },
+    });
+
+    const manager = createResyncManager(h.deps);
+    await vi.waitFor(() => expect(h.timers.length).toBeGreaterThan(0));
+    manager.stop();
+
+    expect(unsubscribed).toBe(true);
   });
 
   it("keeps the schedule alive when a pass throws", async () => {

@@ -28,6 +28,8 @@ const dirtyPages = vi.hoisted(() => ({
   markDirtyPageBlocked: vi.fn(async () => {}),
   selectPagesToResync: vi.fn(() => []),
   blockedPages: vi.fn(() => []),
+  readOfflineDataOwner: vi.fn(async () => ({ status: "none" }) as const),
+  setOfflineDataOwner: vi.fn(async () => true),
 }));
 const persistedStore = vi.hoisted(() => ({
   deletePersistedQueryCache: vi.fn(async () => {}),
@@ -217,6 +219,29 @@ describe("createDefaultResyncDeps — the manager's real dependencies", () => {
       value: original,
       configurable: true,
     });
+  });
+
+  it("reads the owner stamp from the store the records live in", async () => {
+    // A cached boolean can be out of step with the disk; the stamp beside the
+    // records cannot. This is the check that caught a pass pushing the previous
+    // user's document in a browser run.
+    const deps = createDefaultResyncDeps();
+
+    await expect(deps.readOfflineDataOwner()).resolves.toEqual({
+      status: "none",
+    });
+    expect(dirtyPages.readOfflineDataOwner).toHaveBeenCalled();
+  });
+
+  it("compares against the identity ownership was settled for", async () => {
+    const deps = createDefaultResyncDeps();
+
+    expect(deps.currentUserId()).toBeNull();
+    await reconcileOfflineDataOwnership("user-1", {
+      readOfflineDataOwner: async () => ({ status: "none" }),
+      clearOfflineData: async () => {},
+    });
+    expect(deps.currentUserId()).toBe("user-1");
   });
 
   it("wires the registry functions themselves", () => {

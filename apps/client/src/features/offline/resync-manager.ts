@@ -50,10 +50,16 @@ import {
   clearDirtyPage,
   listDirtyPages,
   markDirtyPageBlocked,
+  readOfflineDataOwner,
   selectPagesToResync,
+  type OfflineDataOwner,
 } from "./dirty-pages";
 import { isOfflineEditingEnabled } from "./offline-editing-settings";
-import { offlineDataIsOurs } from "./data-ownership";
+import {
+  getSettledUserId,
+  offlineDataIsOurs,
+  subscribeOwnership,
+} from "./data-ownership";
 import { getOpenPage } from "./open-page-registry";
 import { openResyncSession } from "./resync-session";
 import {
@@ -113,6 +119,12 @@ export interface ResyncManagerDeps {
   isOnline: () => boolean;
   /** The offline data on this disk is provably the signed-in user's. */
   offlineDataIsOurs: () => boolean;
+  /** Notifies when the answer above changes; returns an unsubscribe. */
+  subscribeOwnership: (listener: () => void) => () => void;
+  /** The owner stamp, read from the same store as the work it describes. */
+  readOfflineDataOwner: () => Promise<OfflineDataOwner>;
+  /** The identity the current ownership verdict was reached for. */
+  currentUserId: () => string | null;
   now: () => number;
   publish: typeof setResyncState;
   /** Injected so a test can drive the schedule without real timers. */
@@ -155,6 +167,24 @@ export async function runResyncPass(
   if (!deps.isEnabled() || !deps.isOnline()) return empty;
 
   const result = await deps.withLock(RESYNC_LOCK_NAME, async () => {
+    /**
+     * Ownership again, this time read from the **same store as the records**.
+     *
+     * `offlineDataIsOurs()` above is a cached verdict, and a cached verdict can
+     * be out of step with the disk: a browser run caught a pass pushing the
+     * previous user's document because the flag had been opened while the erase
+     * that followed it was still in flight. The stamp lives beside the records
+     * in one IndexedDB store, so it cannot disagree with them.
+     */
+    const owner = await deps.readOfflineDataOwner();
+    if (
+      owner.status === "unreadable" ||
+      (owner.status === "known" && owner.ownerUserId !== deps.currentUserId())
+    ) {
+      deps.log("offline resync: registry is not this user's, standing down");
+      return empty;
+    }
+
     const records = await deps.listDirtyPages();
     const pages = selectPagesToResync(records, {
       openPageId: deps.getOpenPage(),
@@ -204,6 +234,10 @@ export async function runResyncPass(
         default:
           // `retry` and `aborted` both leave the entry exactly as it was.
           summary.deferred += 1;
+          deps.log(
+            `offline resync: ${page.pageId} deferred`,
+            outcome.status === "retry" ? outcome.reason : outcome.status,
+          );
           break;
       }
       deps.publish({ completed: summary.synced + summary.blocked + summary.deferred });
@@ -319,6 +353,16 @@ export function createResyncManager(
   const onOnline = () => void run("online");
   globalThis.addEventListener?.("online", onOnline);
 
+  /**
+   * Ownership is a hard gate, and it is settled asynchronously — the boot pass
+   * below almost always runs before the answer is known and returns empty. Run
+   * again the moment it becomes known, or the next attempt is a whole idle
+   * interval away.
+   */
+  const unsubscribeOwnership = deps.subscribeOwnership(() => {
+    if (deps.offlineDataIsOurs()) void run("manual");
+  });
+
   void run("boot");
 
   return {
@@ -326,6 +370,7 @@ export function createResyncManager(
     stop: () => {
       stopped = true;
       cancelTimer();
+      unsubscribeOwnership();
       globalThis.removeEventListener?.("online", onOnline);
     },
   };
@@ -408,6 +453,9 @@ export function createDefaultResyncDeps(): ResyncManagerDeps {
     isEnabled: isOfflineEditingEnabled,
     isOnline: () => globalThis.navigator?.onLine !== false,
     offlineDataIsOurs,
+    subscribeOwnership,
+    readOfflineDataOwner,
+    currentUserId: getSettledUserId,
     now: () => Date.now(),
     publish: setResyncState,
     setTimer: (fn, ms) => globalThis.setTimeout(fn, ms) as unknown as number,

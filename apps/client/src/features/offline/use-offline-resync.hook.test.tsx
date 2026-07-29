@@ -24,6 +24,8 @@ const manager = vi.hoisted(() => ({
   RESYNC_LOCK_NAME: "docmost-offline-resync",
 }));
 
+const userService = vi.hoisted(() => ({ getMyInfo: vi.fn() }));
+vi.mock("@/features/user/services/user-service", () => userService);
 vi.mock("./data-ownership", () => ownership);
 vi.mock("./resync-manager", () => manager);
 vi.mock("./resync-state", () => ({ resetResyncState: vi.fn() }));
@@ -38,6 +40,7 @@ import {
 } from "./session-expiry";
 
 const USER = { user: { id: "user-1" } };
+const PREVIOUS_USER = { user: { id: "previous-user" } };
 
 function wrapper(seed?: unknown) {
   const client = new QueryClient({
@@ -52,6 +55,11 @@ function wrapper(seed?: unknown) {
 describe("useOfflineDataOwnership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    userService.getMyInfo.mockResolvedValue(USER);
+    Object.defineProperty(window.navigator, "onLine", {
+      value: true,
+      configurable: true,
+    });
     localStorage.removeItem(OFFLINE_DATA_OWNER_KEY);
     localStorage.removeItem(PENDING_RECOVERY_KEY);
   });
@@ -87,12 +95,77 @@ describe("useOfflineDataOwnership", () => {
     );
   });
 
-  it("does nothing at all until a user is known", async () => {
+  it("refuses, rather than settling, when no user can be identified", async () => {
+    userService.getMyInfo.mockRejectedValue(new Error("401"));
     renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper() });
 
-    await Promise.resolve();
-    expect(ownership.reconcileOfflineDataOwnership).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(ownership.reconcileOfflineDataOwnership).toHaveBeenCalledWith(null),
+    );
     expect(localStorage.getItem(OFFLINE_DATA_OWNER_KEY)).toBeNull();
+  });
+
+  it("asks the server rather than believing a restored cache", async () => {
+    // The audit's third trigger survived the first attempt at this fix here:
+    // the next user signs in, the app boots holding the *previous* user's
+    // identity in a restored cache, and the mismatch is never seen. Waiting for
+    // the app to refetch does not work either — its defaults are
+    // `refetchOnMount: false` with a five-minute `staleTime`, and a browser run
+    // confirmed `/users/me` is never requested on a warm-cache boot.
+    userService.getMyInfo.mockResolvedValue(USER);
+
+    renderHook(() => useOfflineDataOwnership(), {
+      wrapper: wrapper(PREVIOUS_USER),
+    });
+
+    await waitFor(() =>
+      expect(ownership.reconcileOfflineDataOwnership).toHaveBeenCalledWith(
+        "user-1",
+      ),
+    );
+    expect(userService.getMyInfo).toHaveBeenCalled();
+    expect(ownership.reconcileOfflineDataOwnership).not.toHaveBeenCalledWith(
+      "previous-user",
+    );
+  });
+
+  it("trusts the restored cache when there is no network to sign in over", async () => {
+    // Offline, nobody can have signed in, so the cached user is the only user
+    // there is — and refusing here would break offline editing for its owner.
+    // The request is not even attempted: `networkMode: "online"` would pause it
+    // forever, leaving ownership unsettled.
+    Object.defineProperty(window.navigator, "onLine", {
+      value: false,
+      configurable: true,
+    });
+
+    renderHook(() => useOfflineDataOwnership(), { wrapper: wrapper(USER) });
+
+    await waitFor(() =>
+      expect(ownership.reconcileOfflineDataOwnership).toHaveBeenCalledWith(
+        "user-1",
+      ),
+    );
+    expect(userService.getMyInfo).not.toHaveBeenCalled();
+  });
+
+  it("refuses — never guesses from the cache — when the identity request fails", async () => {
+    // Falling back here was observed to guess wrong: the request lost a race
+    // with a new session, the restored cache answered with the *previous*
+    // user, ownership settled as "ours", and the manager pushed that user's
+    // document under the new user's cookie.
+    userService.getMyInfo.mockRejectedValue(new Error("network"));
+
+    renderHook(() => useOfflineDataOwnership(), {
+      wrapper: wrapper(PREVIOUS_USER),
+    });
+
+    await waitFor(() =>
+      expect(ownership.reconcileOfflineDataOwnership).toHaveBeenCalledWith(null),
+    );
+    expect(ownership.reconcileOfflineDataOwnership).not.toHaveBeenCalledWith(
+      "previous-user",
+    );
   });
 
   it("consumes the login notice only after ownership is settled", async () => {
