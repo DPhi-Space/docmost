@@ -8,6 +8,7 @@ import {
   verifyUserToken,
 } from "@/features/auth/services/auth-service";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAtom } from "jotai";
 import { currentUserAtom } from "@/features/user/atoms/current-user-atom";
 import {
@@ -29,11 +30,13 @@ import { useTranslation } from "react-i18next";
 import { isCloud } from "@/lib/config.ts";
 import { deleteLocalPageData } from "@/lib/local-page-data.ts";
 import { exchangeTokenRedirectUrl, getHostnameUrl } from "@/ee/utils.ts";
+import { clearOfflineData } from "@/features/offline/clear-offline-data";
 
 export default function useAuth() {
   const { t } = useTranslation();
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [, setCurrentUser] = useAtom(currentUserAtom);
 
   const handleSignIn = async (data: ILogin) => {
@@ -168,6 +171,7 @@ export default function useAuth() {
     setCurrentUser(RESET);
     await deleteLocalPageData();
     await logout();
+    await clearOfflineData({ queryClient });
     window.location.replace(`${APP_ROUTE.AUTH.LOGIN}?logout=1`);
   };
 

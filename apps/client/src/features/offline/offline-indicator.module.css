@@ -1,0 +1,21 @@
+.pill {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  /* Above the app shell, below Mantine notifications (z-index 10000) so a
+     toast is never obscured by a status pill. */
+  z-index: 300;
+  padding: 6px 12px;
+  pointer-events: none;
+  border: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  background-color: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+}
+
+@media (max-width: $mantine-breakpoint-sm) {
+  .pill {
+    /* Clear of the mobile bottom edge and of centred notifications. */
+    bottom: 12px;
+    left: 12px;
+    right: 12px;
+  }
+}

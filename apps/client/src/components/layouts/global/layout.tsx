@@ -7,6 +7,7 @@ import { SearchSpotlight } from "@/features/search/components/search-spotlight.t
 import React from "react";
 import { useGetSpaceBySlugQuery } from "@/features/space/queries/space-query.ts";
 import { AppErrorBoundary } from "@/components/ui/app-error-boundary.tsx";
+import { OfflineIndicator } from "@/features/offline/offline-indicator.tsx";
 
 export default function Layout() {
   const { spaceSlug } = useParams();
@@ -21,6 +22,7 @@ export default function Layout() {
       </GlobalAppShell>
       {isCloud() && <PosthogUser />}
       <SearchSpotlight spaceId={space?.id} />
+      <OfflineIndicator />
     </UserProvider>
   );
 }
