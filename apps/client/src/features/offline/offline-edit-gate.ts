@@ -13,16 +13,27 @@
  *   editor binds to a populated Yjs document rather than an empty one;
  * - **this page has completed a real remote sync in this browser before**
  *   (`sync-markers.ts`) — the invariant;
- * - the browser reports no network.
+ * - the server cannot be reached.
  *
  * The last term is not in the issue's stated predicate and is a deliberate
- * addition: it confines every behavioural difference to sessions with no
- * connection at all. With it, an ordinary online session — including the rapid
+ * addition: it confines every behavioural difference to sessions that cannot
+ * reach the server. With it, an ordinary online session — including the rapid
  * page-switching sequence of the AGENTS.md data-loss reproduction — takes the
- * *same* code path whether the switch is on or off. The cost is that a session
- * which is nominally online but cannot reach the collaboration server (captive
- * portal, blocked WebSocket) stays read-only exactly as it does today. That is
- * the status quo, not a regression; widening it is a follow-up.
+ * *same* code path whether the switch is on or off.
+ *
+ * It used to read `navigator.onLine`, and that is the one thing about this
+ * feature that had to be replaced rather than tuned: `navigator.onLine` stays
+ * `true` in both Chrome and Safari when Wi-Fi is switched off while a VPN is
+ * configured, because the tunnel interface is still up — so on the machines that
+ * reported it, this gate never opened and offline editing simply did not work.
+ * It now asks `reachability.ts`, which requires an actual answer from our own
+ * origin and applies hysteresis before it will say no. Two consequences worth
+ * being explicit about: a session whose *server* is down (rather than whose
+ * network is) now opens the gate too, which is the same situation from the
+ * document's point of view and pushes on recovery like any other offline edit;
+ * and a session that can reach the API but not the collaboration WebSocket
+ * (blocked upgrade, hostile proxy) still stays read-only, exactly as before,
+ * because the probe is an HTTP request.
  *
  * Nothing here re-closes the gate. `page-editor.tsx` latches `showStatic` to
  * false the first time the gate opens, so reconnecting mid-edit never yanks a
@@ -96,6 +107,10 @@ export interface OfflineEditGateInput {
    * reader refusing on its own account.
    */
   offlineDataIsOurs: boolean;
+  /**
+   * The server is reachable (`reachability.ts`) — *not* `navigator.onLine`, which
+   * reports `true` with no network at all whenever a VPN interface is up.
+   */
   isOnline: boolean;
 }
 

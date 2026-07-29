@@ -34,6 +34,10 @@ interface Harness {
   attempted: string[];
   published: Array<Record<string, unknown>>;
   timers: Array<{ fn: () => void; ms: number }>;
+  /** Publish a change of connectivity, as `reachability.ts` does. */
+  announceOnline: () => void;
+  /** Whether the manager is still listening for one. */
+  listening: () => boolean;
 }
 
 function harness(
@@ -45,6 +49,7 @@ function harness(
   const attempted: string[] = [];
   const published: Array<Record<string, unknown>> = [];
   const timers: Array<{ fn: () => void; ms: number }> = [];
+  const onlineListeners = new Set<() => void>();
 
   const deps: ResyncManagerDeps = {
     listDirtyPages: async () => [...registry.values()],
@@ -61,6 +66,10 @@ function harness(
     withLock: async (_name, run) => run(),
     isEnabled: () => true,
     isOnline: () => true,
+    subscribeOnline: (listener) => {
+      onlineListeners.add(listener);
+      return () => onlineListeners.delete(listener);
+    },
     offlineDataIsOurs: () => true,
     subscribeOwnership: () => () => {},
     readOfflineDataOwner: async () => ({ status: 'none' }) as const,
@@ -73,7 +82,17 @@ function harness(
     ...overrides,
   };
 
-  return { deps, registry, attempted, published, timers };
+  return {
+    deps,
+    registry,
+    attempted,
+    published,
+    timers,
+    announceOnline: () => {
+      for (const listener of [...onlineListeners]) listener();
+    },
+    listening: () => onlineListeners.size > 0,
+  };
 }
 
 describe("nextRetryDelayMs", () => {
@@ -382,7 +401,7 @@ describe("createResyncManager", () => {
     ]);
   });
 
-  it("resets the backoff when the browser comes back online", async () => {
+  it("resets the backoff when the server becomes reachable again", async () => {
     const h = harness([record("a")], {
       a: { status: "retry", reason: "no-handshake" },
     });
@@ -392,11 +411,28 @@ describe("createResyncManager", () => {
     h.timers[0].fn();
     await vi.waitFor(() => expect(h.timers.length).toBe(2));
 
-    globalThis.dispatchEvent(new Event("online"));
+    h.announceOnline();
     await vi.waitFor(() => expect(h.timers.length).toBe(3));
     manager.stop();
 
     expect(h.timers[2].ms).toBe(RESYNC_RETRY_SCHEDULE_MS[0]);
+  });
+
+  it("does not run a pass when the change of verdict is to unreachable", async () => {
+    // The store publishes every *change*, in both directions. Only reconnecting
+    // is a reason to try again; the other direction would open providers on a
+    // dead network and burn a timeout per page.
+    let online = true;
+    const h = harness([record("a")], {}, { isOnline: () => online });
+
+    const manager = createResyncManager(h.deps);
+    await vi.waitFor(() => expect(h.attempted.length).toBe(1));
+    online = false;
+    h.announceOnline();
+    await Promise.resolve();
+    manager.stop();
+
+    expect(h.attempted.length).toBe(1);
   });
 
   it("never runs two passes at once, and runs the queued trigger afterwards", async () => {
@@ -485,9 +521,13 @@ describe("createResyncManager", () => {
     const manager = createResyncManager(h.deps);
     await vi.waitFor(() => expect(h.timers.length).toBe(1));
     const before = h.attempted.length;
+    expect(h.listening()).toBe(true);
     manager.stop();
 
-    globalThis.dispatchEvent(new Event("online"));
+    // Unsubscribed, not merely ignored: a manager the shell has torn down must
+    // not be reachable from the connectivity store at all.
+    expect(h.listening()).toBe(false);
+    h.announceOnline();
     await Promise.resolve();
 
     expect(h.attempted.length).toBe(before);
