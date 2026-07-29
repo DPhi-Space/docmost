@@ -1,3 +1,4 @@
+import { useIsRestoring } from "@tanstack/react-query";
 import { useAtom, useSetAtom } from "jotai";
 import { currentUserAtom } from "@/features/user/atoms/current-user-atom";
 import React, { useEffect } from "react";
@@ -18,6 +19,8 @@ export function UserProvider({ children }: React.PropsWithChildren) {
   const [, setCurrentUser] = useAtom(currentUserAtom);
   const setEntitlements = useSetAtom(entitlementAtom);
   const { data, isLoading, error, isError } = useCurrentUser();
+  const isRestoring = useIsRestoring();
+  const hasCachedUser = Boolean(data?.user && data?.workspace);
   const { data: entitlements } = useEntitlements();
   const { i18n } = useTranslation();
   const [, setSocket] = useAtom(socketAtom);
@@ -25,7 +28,9 @@ export function UserProvider({ children }: React.PropsWithChildren) {
   const { data: collab } = useCollabToken();
 
   useEffect(() => {
-    if (isLoading || isError) {
+    // `isRestoring`: don't open a socket during cache restore only to tear it
+    // down again when the real `/users/me` state settles.
+    if (isRestoring || isLoading || isError) {
       return;
     }
 
@@ -45,7 +50,7 @@ export function UserProvider({ children }: React.PropsWithChildren) {
       console.log("ws disconnected");
       newSocket.disconnect();
     };
-  }, [isError, isLoading]);
+  }, [isError, isLoading, isRestoring]);
 
   useQuerySubscription();
   useTreeSocket();
@@ -70,15 +75,17 @@ export function UserProvider({ children }: React.PropsWithChildren) {
     }
   }, [entitlements]);
 
-  if (isLoading) return <></>;
+  // Offline boot: render as soon as there is user data, whatever the request is
+  // doing. Restoring the persisted cache is asynchronous, and `/users/me` fails
+  // or hangs with no network — blanking on either would make the offline app a
+  // white screen even though every byte it needs is already on disk.
+  if (isRestoring) return <></>;
 
   if (isError && error?.["response"]?.status === 404) {
     return <Error404 />;
   }
 
-  if (error) {
-    return <></>;
-  }
+  if (!hasCachedUser && (isLoading || error)) return <></>;
 
   return <>{children}</>;
 }

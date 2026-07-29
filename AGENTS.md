@@ -140,6 +140,33 @@ tested); everything under `/api` except `GET /api/files/*` passes through untouc
 worker never calls `skipWaiting()` on its own — a new build waits until the user accepts the
 Mantine prompt, so an editor tab is never reloaded mid-session.
 
+### Persisted REST cache (issue #18)
+
+Phase 1b makes the shell *useful* offline by dehydrating the React Query cache into IndexedDB.
+`main.tsx` swaps `QueryClientProvider` for `PersistQueryClientProvider` around the **same**
+exported `queryClient` instance — a dozen modules import that binding directly, so it must be
+wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-client`,
+`@tanstack/query-async-storage-persister`, `idb-keyval`), the first this feature has needed.
+
+- **`query-allowlist.ts` is the whole policy and it is an allowlist, never a denylist.** Only
+  queries whose `queryKey[0]` is on the list reach disk. New query keys appear constantly in this
+  app; a denylist would silently start persisting each one. `collab-token` is a live JWT and must
+  never appear on the list — that is asserted by test, as is every other excluded family
+  (search keys have unbounded cardinality, `notifications` is registered `gcTime: 0`).
+- **`UserProvider` renders whenever cached user data exists.** Previously it returned an empty
+  fragment while `/users/me` was loading or errored, which is why phase 1a booted to a white
+  screen. It now blanks only while the cache is still restoring or when there is no user data at
+  all. Without this the persisted cache is invisible.
+- **Restore invalidates active queries** (`onQueryCacheRestored`). The app's defaults are
+  `refetchOnMount: false` + `staleTime: 5m`, which was harmless when a reload started from an
+  empty cache and would otherwise pin a reloaded tab to yesterday's sidebar forever.
+- **`clearOfflineData()` runs on both session exits** (`handleLogout` and the 401 handler's
+  `redirectToLogin`). It stops persistence *first* so a throttled write cannot restore what it
+  erases, then drops the dehydrated cache, every `page.*` y-indexeddb database (a pre-existing
+  leak that predates this work) and the SW runtime caches. It deliberately **keeps the build's
+  precache**: that holds compiled assets only, and an activated worker never re-runs `install`,
+  so deleting it would break offline boot until the next deploy.
+
 ## Adopting a newer upstream release
 
 ```bash
@@ -217,19 +244,19 @@ Then, in a browser against the running container:
    `sw.js` was missing from `client/dist` when the server booted.
 3. Open a page containing a mermaid block and one containing a D2 block.
 4. DevTools → Network → Offline, reload: the shell boots from cache with `window.CONFIG` intact
-   and no chunk-load errors. **Until #18 lands the app still renders blank** — REST data is not
-   persisted yet, and `UserProvider` blanks the app while `/users/me` fails. Check the shell, not
-   the content: navigation returns 200 and no `Failed to fetch dynamically imported module`.
+   and no chunk-load errors, **and the app renders** — sidebar tree and previously visited pages
+   come from the persisted query cache (#18). A page never opened online shows the "Page not
+   found" empty state rather than crashing.
 5. DevTools → Network → Online: the `/collab` and `/socket.io` WebSockets reconnect normally
    (the worker must never appear in their request chain).
 6. Deploy a newer build, then reload an old tab: the "A new version is available" prompt
    appears, "Reload" activates the waiting worker, and `docmost-offline-precache-*` caches from
    the previous build are gone afterwards. The tab must **not** reload on its own.
 
-The offline diagram criterion cannot be checked by hand until #18 lands. It is covered instead by
-`scratchpad` Playwright drivers that keep the browser genuinely offline for every asset while
-replaying only the API responses #18 will persist; that run showed both previews rendering with
-zero bytes fetched from the network. Re-do that if you change the precache classification.
+Since #18 the offline diagram criterion can be checked by hand: open a page with a mermaid block
+and one with a D2 block while online, go offline, reload, and reopen them. Both previews must
+render with nothing fetched from the network. Re-do this if you change the precache
+classification.
 
 ## Deploy (GHCR)
 
