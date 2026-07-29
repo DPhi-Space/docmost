@@ -14,7 +14,15 @@
  * no background sync loop or `online` listener exists, and the title editor
  * behaves exactly as it does on the base release.
  *
- * **That claim is about the editor, not about the app.** Phases 1a and 1b are
+ * **One exception, deliberate.** The cross-account ownership check
+ * (`data-ownership.ts`) runs whether the switch is on or off, because it is a
+ * privacy control and not a feature — an audit found that gating it here meant
+ * a user who simply declined offline editing thereby declined the cleanup that
+ * keeps the previous user's documents out of their session. It reads one key
+ * from the dirty-page store, which creates that (empty) IndexedDB database on
+ * every authenticated boot. No record is ever written with the switch off.
+ *
+ * **The rest of the claim is about the editor, not about the app.** Phases 1a and 1b are
  * unconditional by design and this switch does not reach them: the service
  * worker still registers and precaches, `docmost-offline` still holds the
  * dehydrated query cache, the update check still runs every thirty minutes, and

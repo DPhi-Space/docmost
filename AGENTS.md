@@ -318,6 +318,9 @@ socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table 
   sync loop exists and the title editor behaves exactly as upstream — that is what makes the
   phase safe to merge. Consequence: a page must be opened online **after** the switch is turned
   on before it can be edited offline.
+  One exception: the cross-account ownership check runs regardless of the switch (see the
+  session-exit section above), so `docmost-offline-dirty` is created — empty, never written to —
+  on every authenticated boot. A safeguard that a feature toggle can disable is not a safeguard.
   **The switch does not make the app byte-identical to upstream, only the editor.** Phases 1a
   and 1b are unconditional by design: the service worker registers and precaches, the query
   cache is dehydrated into `docmost-offline`, the update check runs every 30 minutes and the
