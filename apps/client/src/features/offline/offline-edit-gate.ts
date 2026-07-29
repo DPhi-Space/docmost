@@ -28,8 +28,19 @@
  * false the first time the gate opens, so reconnecting mid-edit never yanks a
  * live editor out from under the user.
  *
- * Phase 3 (#20) hangs its dirty-page registry off this hook: the tick below
- * already holds the provider instance and knows whether the page is syncing.
+ * Phase 3 (#20) hangs its dirty-page registry off this hook, exactly as
+ * anticipated: the tick below already holds the provider instance and knows
+ * whether the page is syncing, so background sync needs **no further change to
+ * `page-editor.tsx`**. Three things were added here and nowhere else:
+ *
+ * - the document is claimed in `open-page-registry.ts` while this hook is
+ *   mounted, which is what stops the resync manager from ever opening a second
+ *   provider on the same `documentName`;
+ * - edits made while this page's provider is not connected are recorded in the
+ *   dirty registry (`dirty-tracking.ts` explains the origin filter);
+ * - the registry entry is dropped the moment a real handshake drains the
+ *   unsynced-changes counter — the "genuine sync" the issue asks for, and the
+ *   same signal the dropped-write detector below already samples.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -37,6 +48,10 @@ import { WebSocketStatus } from "@hocuspocus/provider";
 import { useOnlineStatus } from "./online-state";
 import { useOfflineEditingEnabled } from "./offline-editing-settings";
 import { hasPageRemoteSynced, markPageRemoteSynced } from "./sync-markers";
+import { clearDirtyPage, recordDirtyPage } from "./dirty-pages";
+import { resolveDirtyPageLink } from "./dirty-page-link";
+import { trackDirtyEdits, type DocUpdateSource } from "./dirty-tracking";
+import { claimOpenPage, releaseOpenPage } from "./open-page-registry";
 import {
   initialUnsyncedState,
   nextUnsyncedState,
@@ -81,6 +96,21 @@ export interface RemoteSyncSource {
   /** Per-instance; false until *this* document completes its handshake. */
   readonly synced: boolean;
   readonly unsyncedChanges: number;
+  /**
+   * The Yjs document, for dirty tracking. Optional so the existing tests — and
+   * any future provider — can supply only what they are asked about.
+   */
+  readonly document?: DocUpdateSource;
+}
+
+/**
+ * The bundle `page-editor.tsx` keeps in `providersRef`. Only `remote` is read
+ * for its state; `local` is needed purely as an update *origin* to exclude
+ * (the y-indexeddb replay), never called.
+ */
+export interface PageProviders {
+  remote: RemoteSyncSource;
+  local?: unknown;
 }
 
 export interface UseOfflineEditGateInput {
@@ -97,7 +127,7 @@ export interface UseOfflineEditGateInput {
    * provider still reports `synced === true`, which would write a sync marker
    * for a page the server never acknowledged.
    */
-  providers: { current: { remote: RemoteSyncSource } | null } | null;
+  providers: { current: PageProviders | null } | null;
   /** y-indexeddb finished loading. */
   isLocalSynced: boolean;
   /** `yjsConnectionStatusAtom`. */
@@ -152,6 +182,44 @@ export function useOfflineEditGate({
     setOfflineEditingActive(canEditOffline);
   }, [canEditOffline]);
 
+  /**
+   * Tell the resync manager which document is taken.
+   *
+   * Unconditional — not gated on the switch — because it is a statement of
+   * fact about this tab rather than a behaviour, and because a claim that is
+   * missing is far worse than one that is redundant: the manager would open a
+   * second provider on a document the editor already holds. Released only if
+   * the claim is still ours (see `open-page-registry.ts`).
+   */
+  useEffect(() => {
+    claimOpenPage(pageId);
+    return () => releaseOpenPage(pageId);
+  }, [pageId]);
+
+  /**
+   * Whether the registry may still hold an entry for this page.
+   *
+   * Starts true on every page change so an entry left by an earlier session —
+   * or by another tab — is cleared the first time this page syncs cleanly, and
+   * is set again by each recorded edit. Without it the tick would issue an
+   * IndexedDB delete every second for the life of the page.
+   */
+  const maybeDirtyRef = useRef(true);
+  const isConnectedRef = useRef(isConnected);
+  useEffect(() => {
+    isConnectedRef.current = isConnected;
+  }, [isConnected]);
+
+  /** The dirty-edit subscription, which follows the provider, not the render. */
+  const trackingRef = useRef<{ pageId: string; stop: () => void } | null>(null);
+  useEffect(() => {
+    maybeDirtyRef.current = true;
+    return () => {
+      trackingRef.current?.stop();
+      trackingRef.current = null;
+    };
+  }, [pageId, featureEnabled]);
+
   // The warning belongs to a page, so it is dropped when the page changes — but
   // *not* when the connection drops (see `nextUnsyncedState`, rule 1).
   const stateRef = useRef<UnsyncedState>(initialUnsyncedState);
@@ -178,13 +246,46 @@ export function useOfflineEditGate({
     if (!featureEnabled) return;
 
     const tick = () => {
-      const provider = providers?.current?.remote;
+      const bundle = providers?.current;
+      const provider = bundle?.remote;
       if (!provider) return;
+
+      // Attached from the tick rather than from an effect for the same reason
+      // the provider is *read* from the tick: on the first render
+      // `providersRef.current` is still null, and `PageEditor` is not
+      // remounted across navigation, so there is no render that reliably
+      // coincides with a live provider for this page.
+      if (trackingRef.current?.pageId !== pageId && provider.document) {
+        trackingRef.current?.stop();
+        trackingRef.current = {
+          pageId,
+          stop: trackDirtyEdits({
+            doc: provider.document,
+            ignoredOrigins: () => [
+              providers?.current?.local,
+              providers?.current?.remote,
+            ],
+            isConnected: () => isConnectedRef.current,
+            onDirty: () => {
+              maybeDirtyRef.current = true;
+              void recordDirtyPage(pageId, resolveDirtyPageLink(pageId));
+            },
+          }),
+        };
+      }
 
       const hasLiveSync = isConnected && provider.synced;
       if (hasLiveSync) {
         // A page that syncs is, by definition, available again.
         clearPageUnavailable(pageId);
+        // A completed handshake with nothing outstanding is the "genuine
+        // remote sync" the registry is cleared on — the same evidence
+        // `resync-page.ts` requires of a background push, so the open page and
+        // a background page are held to one standard.
+        if (provider.unsyncedChanges === 0 && maybeDirtyRef.current) {
+          maybeDirtyRef.current = false;
+          void clearDirtyPage(pageId);
+        }
         if (markedRef.current !== pageId) {
           // Once per page per mount: the timer runs every second and the marker
           // is write-once, so re-asking the disk would be pure overhead.
