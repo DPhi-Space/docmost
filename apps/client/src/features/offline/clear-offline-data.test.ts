@@ -143,11 +143,13 @@ describe("clearOfflineData", () => {
   let deletePersistedQueryCache: Mock<() => Promise<void>>;
   let stopPersistingQueryCache: Mock<() => void>;
   let clearPageSyncMarkers: Mock<() => Promise<void>>;
+  let clearDirtyPages: Mock<() => Promise<void>>;
 
   beforeEach(() => {
     deletePersistedQueryCache = vi.fn<() => Promise<void>>(async () => {});
     stopPersistingQueryCache = vi.fn<() => void>();
     clearPageSyncMarkers = vi.fn<() => Promise<void>>(async () => {});
+    clearDirtyPages = vi.fn<() => Promise<void>>(async () => {});
   });
 
   afterEach(() => {
@@ -159,6 +161,7 @@ describe("clearOfflineData", () => {
       deletePersistedQueryCache,
       stopPersistingQueryCache,
       clearPageSyncMarkers,
+      clearDirtyPages,
       ...overrides,
     });
 
@@ -238,6 +241,36 @@ describe("clearOfflineData", () => {
     await run({ indexedDB: null, caches: null });
 
     expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+  });
+
+  it("clears the phase-3 dirty-page registry and its blocked list", async () => {
+    // It names the pages the previous user edited offline — titles and space
+    // slugs included — and would aim the next session's background sync at
+    // them.
+    await run({ indexedDB: null, caches: null });
+
+    expect(clearDirtyPages).toHaveBeenCalledOnce();
+  });
+
+  it("still erases everything else when the dirty registry cannot be cleared", async () => {
+    clearDirtyPages.mockRejectedValue(new Error("blocked"));
+    const queryClient = fakeQueryClient();
+
+    await expect(
+      run({ indexedDB: null, caches: null, queryClient }),
+    ).resolves.toBeUndefined();
+
+    expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
+    expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+    expect(queryClient.clear).toHaveBeenCalledOnce();
+  });
+
+  it("clears the dirty registry even when the sync markers fail", async () => {
+    clearPageSyncMarkers.mockRejectedValue(new Error("blocked"));
+
+    await expect(run({ indexedDB: null, caches: null })).resolves.toBeUndefined();
+
+    expect(clearDirtyPages).toHaveBeenCalledOnce();
   });
 
   it("clears the sync markers even when the query cache deletion fails", async () => {

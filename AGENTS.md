@@ -37,11 +37,12 @@ On top of the `v0.95.0` base:
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
 - `feat: MCP page writes (#15)` — adds `create_page` / `update_page` / `delete_page` to the same
   module (see **MCP write surface** below). Also does not touch collaboration/persistence.
-- `feat(offline): service worker + PWA app shell (#17)`, `persist React Query cache (#18)` and
-  `allow editing offline on previously-synced pages (#19)` — see **Offline/PWA** below. #17/#18
-  touch nothing on the collaboration path; **#19 is the fork's one deliberate exception**, a
-  24-line patch to `page-editor.tsx` that must be re-implemented by hand if the base ever moves
-  past upstream's collab rewrite.
+- `feat(offline): service worker + PWA app shell (#17)`, `persist React Query cache (#18)`,
+  `allow editing offline on previously-synced pages (#19)` and `background sync of offline edits
+  on reconnect (#20)` — see **Offline/PWA** below. #17/#18/#20 touch nothing on the
+  collaboration path; **#19 is the fork's one deliberate exception**, a 24-line patch to
+  `page-editor.tsx` that must be re-implemented by hand if the base ever moves past upstream's
+  collab rewrite. #20 adds *no further* lines to that patch.
 - other commits not mentioned here
 
 With the single, documented exception of #19's 24-line gate patch, none of these touch the
@@ -82,13 +83,13 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
 
-## Offline/PWA (`apps/client/src/features/offline`, issues #17–#19)
+## Offline/PWA (`apps/client/src/features/offline`, issues #17–#20)
 
 Phase 1a of the offline plan (tracking issue #22): a service worker that makes the **app shell**
-(JS/CSS/fonts/icons/locales) load with no network. Data persistence is #18 and offline editing
-is #19, both below; background sync (#20) and uploads (#21) are still unbuilt. Nothing in
-**this** sub-section touches `apps/server/` or the collaboration/persistence path — the whole
-feature makes zero server changes, and only #19 patches a collaboration-adjacent client file.
+(JS/CSS/fonts/icons/locales) load with no network. Data persistence is #18, offline editing is
+#19 and background sync is #20, all below; uploads (#21) are still unbuilt. Nothing in **this**
+sub-section touches `apps/server/` or the collaboration/persistence path — the whole feature
+makes zero server changes, and only #19 patches a collaboration-adjacent client file.
 
 **Hand-rolled, not `vite-plugin-pwa`.** `vite-plugin-pwa` 1.3.0 does install and build fine on
 this base (its peer range includes `vite ^8`, and `injectManifest` works under rolldown — both
@@ -261,6 +262,74 @@ switch off; and `showStatic` latches globally rather than per page (upstream beh
 page never visited before can still show an empty live editor if it is opened *after* an
 offline-editable page in the same session — opening it as the first page of an offline session
 correctly stays static.
+
+### Background sync on reconnect (issue #20)
+
+Phase 3 removes the "next time you open that page" clause from phase 2: edits made offline are
+pushed on reconnect **without the user re-opening anything**. All of it lives in
+`features/offline/`; `page-editor.tsx` gains **zero further lines**, and so does every other
+upstream file — the loop is hosted by `OfflineIndicator`, which `layout.tsx` already mounts.
+
+The shape is a registry plus a serial loop: `dirty-pages.ts` (its own IndexedDB database, for
+the same `NotFoundError` reason as the sync markers) records a page when the phase-2 hook sees a
+local edit on a disconnected provider; `resync-manager.ts` walks it one page at a time;
+`resync-page.ts` decides what happened to each; `resync-session.ts` builds the actual providers.
+
+- **The origin filter is not optional** (`dirty-tracking.ts`). `y-indexeddb@9.0.12` replays a
+  stored document with the `IndexeddbPersistence` **as the transaction origin**
+  (`Y.transact(doc, …, idbPersistence, false)`), and `@hocuspocus/provider` applies server
+  updates with the provider as origin. Without excluding both, merely *opening* a page offline
+  would mark it dirty — and every page the user only read offline would be queued for a
+  background push and, if locked, reported to them as blocked. The rule is stated as an
+  exclusion, not as a match on `ySyncPluginKey`, because a missed edit is lost work while a
+  spurious record costs one redundant sync.
+- **`resync-session.ts` is a transcription of `page-editor.tsx:138-212`, not a design.** Same
+  construction order, same `attach()`, same teardown order. Inventing a second provider
+  lifecycle is precisely the risk the v0.95.0 pin exists to remove. Its one addition is
+  `ydoc.destroy()` at the end, which the editor does not need (its document dies with the
+  component) and a loop that opens one per page per pass does.
+- **`blocked` vs `retry` is the whole judgement**, and the discriminator is whether a handshake
+  was ever observed. `provider.synced` is set when the **server sends SyncStep2**
+  (`applySyncMessage`), so it becomes true even on a read-only connection; `unsyncedChanges` is
+  seeded to exactly 1 by `startSync()` (`resetUnsyncedChanges` *assigns*, discarding anything
+  counted while the socket was still opening) and decremented only by `SyncStatus(true)` — there
+  is no `false` branch (see the phase-2 notes above). So: handshake seen + counter drained =
+  pushed; handshake seen + counter pinned = **the server refused** (locked/trashed/read-only) →
+  `blocked`, kept and surfaced; no handshake = unreachable → `retry`, entry untouched, backoff.
+  A dead network must never be reported to the user as "this page could not sync", and a locked
+  page must never be retried in silence forever. Authentication failure with a token
+  `isCollabTokenExpired()` says is still valid is the other `blocked` reason: the page was
+  hard-deleted, or access to it was revoked.
+- **The offline edits ride the handshake.** The client answers the server's SyncStep1 with a
+  SyncStep2 containing everything the server lacks — the same mechanism that pushes them today
+  when the page is re-opened. Nothing in phase 3 constructs, replays or discards a Yjs update.
+- **Three exclusions, three mechanisms.** Serial within a tab (the loop awaits each page); one
+  tab per browser via `navigator.locks.request(…, { ifAvailable: true })` — `ifAvailable` so a
+  second tab *declines* rather than queueing a duplicate pass; and never the page on screen, via
+  `open-page-registry.ts`, checked before each page **and on every poll**, because the user can
+  navigate into a page mid-push. The editor's claim is unconditional and always wins.
+- **Blocked entries are never discarded**, and the UI is a *persistent* affordance rather than a
+  toast: the work exists only on this device and nothing else in the product will ever mention
+  it. The link is built from metadata captured at record time (`dirty-page-link.ts`) so it
+  survives query-cache eviction; the resolver is *installed* by `use-offline-resync.ts` rather
+  than imported, so the editor hook never drags `main.tsx` into its unit tests.
+- **The switch still gates everything.** With `docmost.offline-editing` off the manager is never
+  created — no timers, no `online` listener, no database — and the switch is reactive, so
+  turning it on starts the loop without a reload.
+- **Both new stores are cleared by `clearOfflineData()` on logout.** The registry is an index;
+  the edits it indexes are the `page.*` databases the same call already deletes.
+
+Deviations from #20, deliberate: the retry schedule is `5 s → 15 s → 60 s → 3 min → 10 min`
+rather than "~60 s with backoff" (a flapping reconnect is worth recovering from in five seconds;
+a device that has failed five passes is not about to succeed on the sixth), and blocked entries
+are retried on *trigger* passes (reconnect, boot, manual) but skipped by the periodic timer,
+which would otherwise burn a 30 s timeout per locked page on every tick forever.
+
+Known limitations: a page whose lock is lifted while the tab sits idle is not re-attempted until
+the next reconnect, boot or review; and the manager pushes Yjs content only — a title edited
+offline is still lost, since titles are REST-only (#19's note stands). An outbox for titles
+remains out of scope, as does #21's attachment outbox, which will plug its replay into this same
+manager.
 
 ## Adopting a newer upstream release
 
