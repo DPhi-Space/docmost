@@ -29,6 +29,7 @@ import { NoopAuditModule } from './integrations/audit/audit.module';
 import { ThrottleModule } from './integrations/throttle/throttle.module';
 import { ApiKeyModule } from './core/api-key/api-key.module';
 import { McpModule } from './core/mcp/mcp.module';
+import { PersonalSpaceModule } from './core/personal-space/personal-space.module';
 
 const enterpriseModules = [];
 try {
@@ -93,6 +94,10 @@ try {
     // Native (non-EE) read-only MCP server, gated by Feature.MCP + the
     // per-workspace settings.ai.mcp toggle.
     McpModule,
+    // Native (non-EE) personal spaces, gated by the per-workspace
+    // settings.spaces.allowPersonal toggle (itself gated on
+    // Feature.PERSONAL_SPACES when written).
+    PersonalSpaceModule,
     ...enterpriseModules,
   ],
   controllers: [AppController],
