@@ -37,10 +37,15 @@ On top of the `v0.95.0` base:
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
 - `feat: MCP page writes (#15)` — adds `create_page` / `update_page` / `delete_page` to the same
   module (see **MCP write surface** below). Also does not touch collaboration/persistence.
+- `feat(offline): service worker + PWA app shell (#17)`, `persist React Query cache (#18)` and
+  `allow editing offline on previously-synced pages (#19)` — see **Offline/PWA** below. #17/#18
+  touch nothing on the collaboration path; **#19 is the fork's one deliberate exception**, a
+  24-line patch to `page-editor.tsx` that must be re-implemented by hand if the base ever moves
+  past upstream's collab rewrite.
 - other commits not mentioned here
 
-None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
-adoption low-conflict.
+With the single, documented exception of #19's 24-line gate patch, none of these touch the
+collaboration/persistence/page-load path — that's what keeps upstream adoption low-conflict.
 
 ## MCP write surface (`core/mcp`, issue #15)
 
@@ -77,12 +82,13 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
 
-## Offline/PWA (`apps/client/src/features/offline`, issue #17)
+## Offline/PWA (`apps/client/src/features/offline`, issues #17–#19)
 
 Phase 1a of the offline plan (tracking issue #22): a service worker that makes the **app shell**
-(JS/CSS/fonts/icons/locales) load with no network. Data persistence, offline editing and
-background sync are later phases and are **not** in here. Nothing in this feature touches
-`apps/server/` or the collaboration/persistence path.
+(JS/CSS/fonts/icons/locales) load with no network. Data persistence is #18 and offline editing
+is #19, both below; background sync (#20) and uploads (#21) are still unbuilt. Nothing in
+**this** sub-section touches `apps/server/` or the collaboration/persistence path — the whole
+feature makes zero server changes, and only #19 patches a collaboration-adjacent client file.
 
 **Hand-rolled, not `vite-plugin-pwa`.** `vite-plugin-pwa` 1.3.0 does install and build fine on
 this base (its peer range includes `vite ^8`, and `injectManifest` works under rolldown — both
@@ -184,6 +190,78 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   open with no `versionchange` handler, so the delete parks as `blocked` and then blocks every
   later `indexedDB.open` of that name for the life of the document.
 
+### Offline editing (issue #19) — ⚠️ the fork's one exception to "don't touch collab code"
+
+Phase 2 makes a previously-synced page **editable with no connection**. It is the only part of
+this fork that patches a collaboration-adjacent file, and the patch is deliberately tiny.
+
+**The standing cost, stated plainly.** `apps/client/src/features/editor/page-editor.tsx` is the
+exact file upstream rewrote in the Hocuspocus v4 / `collab-socket.ts` work that produced the
+data-loss regression this fork is pinned away from (docmost#2353, see the top of this file).
+**If the base ever moves onto a release containing that rewrite, this patch will not apply and
+must be re-implemented by hand against the new file** — do not resolve it as a merge conflict
+and hope. Everything else in the feature lives in `features/offline/` and rebases cleanly.
+The patch is 24 lines (`+17 −7`) and consists of exactly four things:
+
+1. one import from `features/offline/offline-editing.ts` (a barrel that exists purely so this is
+   *one* import statement to re-create);
+2. `useOfflineEditGate({ pageId, providers: providersRef, isLocalSynced, connectionStatus })`;
+3. one widened condition — `showStatic` may also flip false when the gate allows it, in addition
+   to the existing first-`Connected`-and-synced path;
+4. `onAuthenticationFailed` now asks `isCollabTokenExpired()` instead of calling
+   `jwtDecode(collabQuery?.token)` (which **throws** on the undefined token an offline boot
+   produces, since `collab-token` is deliberately never persisted), and reports a non-expired
+   failure instead of swallowing it.
+
+Provider creation/destruction (`providersRef`), `IndexeddbPersistence` usage, and the ydoc are
+untouched. No ydoc is ever seeded from REST content.
+
+**The invariant.** *A document that has never completed a real remote sync in this browser is
+never editable.* `sync-markers.ts` writes a per-page marker only when the **provider instance's
+own** `synced` is true on a `Connected` socket, so the marker means y-indexeddb holds real
+server content, never an empty shell — which is precisely what upstream's regression let become
+authoritative. `canEditWithoutConnection()` is pure and its sixteen-row truth table is a test.
+
+- The gate reads the provider through `providersRef` **itself**, not `providersRef.current`.
+  `PageEditor` is not remounted when the route changes — only the `pageId` prop changes — and
+  `page-editor.tsx` never resets `isLocalSynced` / `isRemoteSynced` on that change, so a value
+  captured during render can belong to a provider that has since been destroyed. A destroyed
+  provider still reports `synced === true`, which would mark a page the server never
+  acknowledged. Same reason the hook holds *which page* is known synced rather than a boolean.
+- The gate also requires `navigator.onLine === false`. Not in the issue's predicate; added so
+  that every behavioural difference is confined to sessions with no network — an ordinary online
+  session takes the same path with the switch on as with it off, including the data-loss repro.
+  A session that is nominally online but cannot reach the collab server therefore stays
+  read-only, exactly as today.
+- **Dropped writes are surfaced, never resolved by discarding.** The server marks a connection
+  `readOnly` for space READERs, page-level restrictions, **the fork's page lock** and trashed
+  pages (`authentication.extension.ts`), then answers each update with `SyncStatus(false)`.
+  Hocuspocus 3.4.4's provider has no `false` branch in `applySyncStatusMessage` — no event, no
+  error — so `unsyncedChanges` never drains and the local doc silently diverges. The provider
+  *does* expose the counter as a property, a `hasUnsyncedChanges` getter and an `unsyncedChanges`
+  event, but a dropped write produces **no transition**, so the event cannot detect it; only
+  elapsed time distinguishes a dropped write from a slow one. `unsynced-changes.ts` therefore
+  samples the counter every second and warns after 10 s of a non-draining counter on a live,
+  synced connection. The warning clears only when the counter reaches zero.
+- **The switch is `localStorage`, default off** (`offline-editing-settings.ts`, key
+  `docmost.offline-editing`), not a server-side user preference: the fork makes no
+  `apps/server/` changes here, and a setting that gates *offline* behaviour has to be readable
+  on the boot where there is no network. With it off, nothing is read or written, no marker
+  database is created, no banner renders and the title editor behaves exactly as upstream — that
+  is what makes the phase safe to merge. Consequence: a page must be opened online **after**
+  the switch is turned on before it can be edited offline.
+- **The page title stays offline-disabled** (tooltip: "Title editing requires a connection").
+  It is not in the Yjs document — `title-editor.tsx` saves it through a debounced
+  `POST /api/pages/update` with no optimistic write and no retry — so an offline title edit is
+  lost in silence. A title outbox is out of scope for #19.
+
+Known limitations, all documented rather than hidden: the switch also gates the dropped-write
+warning and the title lock, so both bugs remain reachable in their pre-existing form with the
+switch off; and `showStatic` latches globally rather than per page (upstream behaviour), so a
+page never visited before can still show an empty live editor if it is opened *after* an
+offline-editable page in the same session — opening it as the first page of an offline session
+correctly stays static.
+
 ## Adopting a newer upstream release
 
 ```bash
@@ -274,6 +352,24 @@ Since #18 the offline diagram criterion can be checked by hand: open a page with
 and one with a D2 block while online, go offline, reload, and reopen them. Both previews must
 render with nothing fetched from the network. Re-do this if you change the precache
 classification.
+
+**Offline editing repro** (#19; run the data-loss reproduction above **twice**, once with the
+switch on and once off — the switch must make no difference to it):
+
+1. Settings → Preferences → **Edit pages offline** → on. Open a page online and let it sync.
+2. Go offline (DevTools → Network → Offline). The live editor stays up and a grey "Offline —
+   changes are saved locally…" banner appears. Type in the body, and inside a mermaid/D2 code
+   block. The page title must be non-editable with a tooltip.
+3. Reload while still offline: the edits are still there and the editor is still live.
+4. Meanwhile, from another account, edit the same page. Go back online: both sets of edits are
+   present. `select octet_length(ydoc), length(text_content) from pages` must **grow**; a
+   populated page collapsing to ~100–500 bytes with `text=0` is the regression.
+5. Lock the page from the other account while the first user edits it offline, then reconnect:
+   within ~15 s the orange "Your changes could not be saved to the server" banner appears and
+   the local document is untouched. Nothing may ever discard it.
+6. Open a page never visited before as the **first** page of an offline session: it must stay
+   static and read-only.
+7. Switch off ⇒ everything above is inert: static read-only offline, no banners, editable title.
 
 ## Deploy (GHCR)
 

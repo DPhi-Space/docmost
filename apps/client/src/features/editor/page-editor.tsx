@@ -68,7 +68,11 @@ import { useParams } from "react-router-dom";
 import { extractPageSlugId, platformModifierKey } from "@/lib";
 import { FIVE_MINUTES } from "@/lib/constants.ts";
 import { PageEditMode } from "@/features/user/types/user.types.ts";
-import { jwtDecode } from "jwt-decode";
+import {
+  isCollabTokenExpired,
+  reportPageUnavailable,
+  useOfflineEditGate,
+} from "@/features/offline/offline-editing";
 import { searchSpotlight } from "@/features/search/constants.ts";
 import { useEditorScroll } from "./hooks/use-editor-scroll";
 import { EditorAiMenu } from "@/ee/ai/components/editor/ai-menu/ai-menu";
@@ -167,9 +171,8 @@ export default function PageEditor({
         }
       };
       const onAuthenticationFailedHandler = () => {
-        const payload = jwtDecode(collabQuery?.token);
-        const now = Date.now().valueOf() / 1000;
-        const isTokenExpired = now >= payload.exp;
+        const isTokenExpired = isCollabTokenExpired(collabQuery?.token);
+        if (!isTokenExpired) reportPageUnavailable(pageId);
         if (isTokenExpired) {
           refetchCollabToken().then((result) => {
             if (result.data?.token) {
@@ -405,16 +408,23 @@ export default function PageEditor({
   const hasConnectedOnceRef = useRef(false);
   const [showStatic, setShowStatic] = useState(true);
 
+  const { canEditOffline } = useOfflineEditGate({
+    pageId,
+    providers: providersRef,
+    isLocalSynced,
+    connectionStatus: yjsConnectionStatus,
+  });
+
   useEffect(() => {
     if (
       !hasConnectedOnceRef.current &&
-      yjsConnectionStatus === WebSocketStatus.Connected &&
-      isSynced
+      ((yjsConnectionStatus === WebSocketStatus.Connected && isSynced) ||
+        canEditOffline)
     ) {
       hasConnectedOnceRef.current = true;
       setShowStatic(false);
     }
-  }, [yjsConnectionStatus, isSynced]);
+  }, [yjsConnectionStatus, isSynced, canEditOffline]);
 
   return (
     <TransclusionLookupProvider>
