@@ -1,0 +1,118 @@
+diff --git a/dist/extensions/vim/clipboard.js b/dist/extensions/vim/clipboard.js
+index 8fac412e51155ecb7921061effaa26e73983eb9a..ca042be47f2b9a76aafb426d0e4a9e70c81a2e74 100644
+--- a/dist/extensions/vim/clipboard.js
++++ b/dist/extensions/vim/clipboard.js
+@@ -415,9 +415,6 @@ export function setClipboardSerializerFromView(view) {
+     clipboardSerializer = (slice) => view.serializeForClipboard(slice);
+ }
+ export async function writeSystemClipboardRange(state, from, to, linewise = false) {
+-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+-        return false;
+-    }
+     const slice = getClipboardSlice(state, from, to, linewise);
+     let clipboardSlice = slice;
+     let text = normalizeClipboardWriteText(state.doc.textBetween(from, to, '\n', '\n'), linewise);
+@@ -444,6 +441,14 @@ export async function writeSystemClipboardRange(state, from, to, linewise = fals
+         linewise,
+         slice: clipboardSlice,
+     };
++    // DOCMOST FORK PATCH — record the register before consulting the clipboard
++    // API, not after. navigator.clipboard is undefined in any non-secure
++    // context, so upstream's early return left y/d/c/x recording nothing at
++    // all and p silently doing nothing on plain-HTTP self-hosted deployments.
++    // The register is in-memory and owes the browser nothing.
++    if (typeof navigator === 'undefined' || !navigator.clipboard) {
++        return false;
++    }
+     if (navigator.clipboard.write &&
+         typeof ClipboardItem !== 'undefined' &&
+         typeof Blob !== 'undefined') {
+diff --git a/dist/extensions/vim/keyHandler.js b/dist/extensions/vim/keyHandler.js
+index a058356edc82576a5b4ef0d65daadda318d11d8c..027f3ca8129113f5803c56a326e17fa031a4053e 100644
+--- a/dist/extensions/vim/keyHandler.js
++++ b/dist/extensions/vim/keyHandler.js
+@@ -4,7 +4,7 @@ import { resolveTextObject, executeDelete, executeYank, executeChange, deleteLin
+ import { deleteChar, pasteAfter, pasteBefore, replaceChars, openLineBelow, openLineAbove, joinLines, } from './commands';
+ import { updateVisualSelection, getVisualRange } from './visual';
+ import { lineStartAt, lineEndAt, firstNonBlank, findAllMatches, wordUnderCursor, } from './utils';
+-import { getLastInternalClipboardContent, readSystemClipboardContent, setClipboardSerializerFromView, } from './clipboard';
++import { getLastInternalClipboardContent, setClipboardSerializerFromView, } from './clipboard';
+ function clearPendingState(vimState) {
+     vimState.count = null;
+     vimState.operator = null;
+@@ -38,44 +38,38 @@ function sameClipboardText(a, b) {
+     const normalizeNewlines = (text) => text.replace(/\r\n?/g, '\n');
+     return normalizeNewlines(a) === normalizeNewlines(b);
+ }
++// DOCMOST FORK PATCH — p/P paste from the unnamed register only.
++//
++// Upstream reads the *system* clipboard first, via navigator.clipboard.read().
++// In a browser that is a permission-gated call: Chrome and Safari raise a
++// "Paste" confirmation the user has to click every single time, Firefox has no
++// clipboard.read() for page script at all. It is also async and unawaited on
++// the write side, so `dd` immediately followed by `p` can race and paste the
++// previous clipboard contents, and its own Markdown re-parser competes with
++// Docmost's MarkdownClipboard extension.
++//
++// So: paste the register, synchronously, like vim's unnamed register actually
++// works. The register is populated by y/d/c/x (writeSystemClipboardRange sets
++// it before it awaits). Pasting from *outside* the editor stays on the system
++// paste shortcut, which is what routes through Docmost's own paste pipeline —
++// image and file uploads, markdown transform, link handling — none of which
++// this code path can do.
+ function pasteFromClipboard(view, vimState, count, before) {
+-    const readState = view.state;
+-    const internalClipboard = getLastInternalClipboardContent();
+-    void readSystemClipboardContent(readState).then((systemClipboard) => {
+-        let clipboard = systemClipboard;
+-        if (clipboard === null) {
+-            clipboard = internalClipboard;
+-            if (clipboard === null) {
+-                updateStatus(view, vimState, 'clipboard unavailable');
+-                return;
+-            }
+-        }
+-        else if (internalClipboard?.slice &&
+-            sameClipboardText(clipboard.text, internalClipboard.text)) {
+-            // Prefer the rich structure from the most recent Vim copy/delete/change
+-            // whenever the plain text matches. The system read may expose only plain
+-            // text, or a lossy Markdown-reparsed slice that drops marks (highlight,
+-            // color, underline) on headings and list items; the internal slice is the
+-            // lossless source of truth for same-session paste. The comparison ignores
+-            // line-ending differences because some platforms (e.g. Windows) normalize
+-            // `\n` to `\r\n` on a clipboard round-trip.
+-            clipboard = {
+-                text: clipboard.text,
+-                linewise: internalClipboard.linewise,
+-                slice: internalClipboard.slice,
+-            };
+-        }
+-        if (!clipboard.text && !clipboard.slice)
+-            return;
+-        const state = view.state;
+-        const pos = state.selection.$head.pos;
+-        const tr = before
+-            ? pasteBefore(state, pos, clipboard, count)
+-            : pasteAfter(state, pos, clipboard, count);
+-        if (tr.docChanged || tr.selectionSet) {
+-            view.dispatch(tr);
+-        }
+-    });
++    const clipboard = getLastInternalClipboardContent();
++    if (clipboard === null) {
++        updateStatus(view, vimState, 'register empty — paste with Ctrl/Cmd-V');
++        return;
++    }
++    if (!clipboard.text && !clipboard.slice)
++        return;
++    const state = view.state;
++    const pos = state.selection.$head.pos;
++    const tr = before
++        ? pasteBefore(state, pos, clipboard, count)
++        : pasteAfter(state, pos, clipboard, count);
++    if (tr.docChanged || tr.selectionSet) {
++        view.dispatch(tr);
++    }
+ }
+ /**
+  * Apply a motion N times, returning the final position.

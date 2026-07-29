@@ -43,6 +43,13 @@ On top of the `v0.95.0` base:
   collaboration path; **#19 is the fork's one deliberate exception**, a 24-line patch to
   `page-editor.tsx` that must be re-implemented by hand if the base ever moves past upstream's
   collab rewrite. #20 adds *no further* lines to that patch.
+- `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
+  behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
+  `updatePreference` branch.
+- `feat: native personal spaces` — the two endpoints the shipped client already calls
+  (`core/personal-space`), letting a MEMBER own exactly one space (see **Personal spaces** below).
+  Unlocks `Feature.PERSONAL_SPACES` in `FORK_ENABLED_FEATURES`. No client changes, no schema
+  changes, no permission-model changes.
 - other commits not mentioned here
 
 With the single, documented exception of #19's 24-line gate patch, none of these touch the
@@ -423,6 +430,119 @@ the next reconnect, boot or review; and the manager pushes Yjs content only — 
 offline is still lost, since titles are REST-only (#19's note stands). An outbox for titles
 remains out of scope, as does #21's attachment outbox, which will plug its replay into this same
 manager.
+## Vim keybindings (`features/editor/extensions/vim-mode.ts`, PR #26)
+
+Modal editing in the **page editor only**, off by default behind the `vimMode` user preference
+(same plumbing as `editorToolbar`, straight through `updatePreference` into the existing settings
+JSONB — no migration). Nothing here touches the collaboration/persistence path.
+
+**Status: spike.** [`vim-prosemirror@0.2.0`](https://www.npmjs.com/package/vim-prosemirror) is
+three weeks old, single-maintainer, and already patched twice. It is on trial, not adopted.
+
+**We wrap its raw ProseMirror plugin, never its Tiptap extension** (`vim-prosemirror/tiptap`):
+
+1. Its wrapper calls `editor.commands.undo()` unguarded, which throws in the pre-sync static
+   editor, the readonly editor and the history editor — all of which share `mainExtensions` and
+   load no history extension.
+2. Its `>>`/`<<` hardcodes `sinkListItem("listItem")` and never reaches our `Indent` extension or
+   task items.
+3. The preference must toggle **without rebuilding the extension array**, which would recreate the
+   collaborative editor mid-page. So the plugin is always registered and gated per-editor at
+   runtime through a `WeakMap<Editor, VimRuntime>`, and `mainExtensions`' other consumers
+   (readonly, history, transclusion, template) can never pick it up.
+
+**Command lookup must stay lazy.** `addProseMirrorPlugins` runs while the `Editor` is still being
+constructed — `createCommandManager()` has not run yet — so a captured `editor.commands` is an
+empty map and every lookup misses silently. That is what broke `u`. Resolve per keypress.
+
+**Keys we take back from vim** (`shouldBypassVim`): the library reads `event.ctrlKey` and never
+looks at `metaKey`, so on macOS every Cmd chord arrives as a bare vim key — Cmd-V entered visual
+mode, Cmd-C started a change operator, Cmd-X deleted a character. Cmd and Alt chords are now
+handed back whole; on non-Apple platforms, where Ctrl is both modifiers, the browser and app keep
+`a c v x z y f` and vim keeps the rest of its Ctrl bindings. Open slash/emoji popups bypass too.
+
+**Touch devices are opted out.** Soft keyboards emit `keydown` with keyCode 229 and no usable
+`key`, so modal editing silently degrades to always-insert.
+
+### The two dependency patches (`patches/vim-prosemirror@0.2.0.patch`)
+
+`VimState.register` is declared in the types but is **dead code** in 0.2.0 — there is no register.
+`y`/`d`/`c`/`x` write to the *system clipboard* and `p` reads it back with
+`navigator.clipboard.read()`, which is permission-gated in Chrome and Safari (a Paste dialog on
+every press) and absent for page script in Firefox. It is also async and unawaited on the write
+side, so `dd` then a fast `p` can race, and its own Markdown re-parser competes with our
+`MarkdownClipboard` extension.
+
+1. `p`/`P` paste the in-memory register synchronously, like vim's unnamed register. Pasting from
+   *outside* the editor stays on Ctrl/Cmd-V — the only path that reaches Docmost's own paste
+   pipeline (image/file upload, markdown transform), which vim's path cannot do.
+2. The register is recorded **before** the `navigator.clipboard` guard, not after. Upstream's
+   early return meant `y`/`d`/`c`/`x` recorded nothing in a non-secure context, so `p` was dead on
+   plain-HTTP self-hosted deployments.
+
+If a third patch becomes necessary, vendor the package into `packages/editor-ext` instead — at
+that point our own vim code outweighs the glue.
+
+### Known gaps
+
+- No `:` ex commands, so no `:%s/pat/rep/g` — tracked in issue #25. `Mod-F` find & replace is
+  unaffected and still works.
+- `Escape` is consumed in normal mode, so it will not close the find dialog from inside the editor.
+- `zz`/`H`/`M`/`L` resolve against the scroll container and are untested against our layout.
+- `vim-prosemirror` publishes ESM with extensionless relative imports, which Node's resolver
+  rejects. Vite backfills the extension; **vitest needs `server.deps.inline`** (see
+  `apps/client/vitest.config.ts`).
+
+## Personal spaces (`core/personal-space`)
+
+Lets a workspace MEMBER own exactly one space of their own. The **only** thing this adds is a
+second way to create a space; everything after creation is an ordinary space.
+
+**Almost all of it already shipped natively in the `v0.95.0` base** — the schema
+(`spaces.is_personal` + the `spaces_personal_creator_unique` partial index),
+`SpaceRepo.findPersonalSpace`, `SpaceService.createSpace`'s `{ isPersonal }` option, the audit
+entry, the workspace toggle (`settings.spaces.allowPersonal`, licence-gated on
+`Feature.PERSONAL_SPACES` in `workspace.service.ts`) and the **entire client**
+(`apps/client/src/ee/personal-space/*`; the client `ee/` dir is in-repo, only `apps/server/src/ee`
+is the unfetchable submodule). Only the two endpoints the client calls — `POST
+/personal-space/info` and `POST /personal-space/create` — were EE-only. This module is those two
+endpoints and nothing else; there are **no client, schema or permission-model changes**.
+
+**Why a separate endpoint at all.** `spaces/create` requires the workspace-level
+`Manage`/`Space` ability, which MEMBERs do not have (`workspace-ability.factory.ts`), so a member
+can otherwise never own a space. `personal-space/create` deliberately does not perform that check
+— the admin toggle plus the one-per-creator unique index are what replace it. That is the whole
+feature, and it is why the create path lives in its own controller rather than as a flag on
+`spaces/create`.
+
+**Licensing is checked once, on the toggle write**, matching the MCP module: an unlicensed
+workspace can never switch `allowPersonal` on, so the endpoint checks only the toggle. `info` is
+deliberately *not* toggle-gated — turning the toggle off stops new personal spaces, it does not
+hide the one a user already owns (which is what the client's top menu expects).
+
+**The slug is generated, never accepted from the client** (the modal has no slug field).
+`slugBase()` folds accents, drops apostrophes and collapses the rest to hyphens, then up to four
+retries append a short nanoid suffix — personal-space names collide by nature (two Sams in one
+workspace). Its output is asserted against `CreateSpaceDto`'s slug regex by test, since nothing
+else validates a server-generated slug.
+
+### Deliberate non-changes (behaviour you should know about before enabling it)
+
+These are all pre-existing Docmost semantics, kept as-is on purpose:
+
+- **Workspace owners/admins cannot see a personal space.** `SpaceAbilityFactory` resolves roles
+  purely from `space_members` and has no owner override; `WorkspaceCaslSubject.Space` is checked
+  in exactly one place in the server (`space.controller.ts`, `spaces/create`). So an owner cannot
+  read, list, export or delete another user's personal space, and cannot add themselves to it.
+  This is already true of any space an admin isn't a member of — personal spaces just make that
+  set large. Creation is still audited (`SPACE_CREATED` with `isPersonal: true`).
+- **"Personal" is not enforced after creation.** The creator is space ADMIN, so they can rename
+  it, add members/groups, or public-share pages from it (still subject to `disablePublicSharing`).
+  Nothing re-reads `is_personal`.
+- **Deleting a user orphans their personal space.** `workspace.service.deleteUser` removes the
+  user's `space_members` rows but never touches `spaces`, so the space survives with zero members:
+  unreachable by everyone and undeletable through any route. Pre-existing for any space, but
+  personal spaces make it routine — fix it deliberately, not as a side effect of this feature.
 
 ## Adopting a newer upstream release
 
