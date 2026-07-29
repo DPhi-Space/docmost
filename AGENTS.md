@@ -37,6 +37,9 @@ On top of the `v0.95.0` base:
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
 - `feat: MCP page writes (#15)` — adds `create_page` / `update_page` / `delete_page` to the same
   module (see **MCP write surface** below). Also does not touch collaboration/persistence.
+- `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
+  behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
+  `updatePreference` branch.
 - other commits not mentioned here
 
 None of these touch the collaboration/persistence/page-load path — that's what keeps upstream
@@ -76,6 +79,69 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 `create_page` are unaffected — creation writes its ydoc directly in `PageService.create`.
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
+
+## Vim keybindings (`features/editor/extensions/vim-mode.ts`, PR #26)
+
+Modal editing in the **page editor only**, off by default behind the `vimMode` user preference
+(same plumbing as `editorToolbar`, straight through `updatePreference` into the existing settings
+JSONB — no migration). Nothing here touches the collaboration/persistence path.
+
+**Status: spike.** [`vim-prosemirror@0.2.0`](https://www.npmjs.com/package/vim-prosemirror) is
+three weeks old, single-maintainer, and already patched twice. It is on trial, not adopted.
+
+**We wrap its raw ProseMirror plugin, never its Tiptap extension** (`vim-prosemirror/tiptap`):
+
+1. Its wrapper calls `editor.commands.undo()` unguarded, which throws in the pre-sync static
+   editor, the readonly editor and the history editor — all of which share `mainExtensions` and
+   load no history extension.
+2. Its `>>`/`<<` hardcodes `sinkListItem("listItem")` and never reaches our `Indent` extension or
+   task items.
+3. The preference must toggle **without rebuilding the extension array**, which would recreate the
+   collaborative editor mid-page. So the plugin is always registered and gated per-editor at
+   runtime through a `WeakMap<Editor, VimRuntime>`, and `mainExtensions`' other consumers
+   (readonly, history, transclusion, template) can never pick it up.
+
+**Command lookup must stay lazy.** `addProseMirrorPlugins` runs while the `Editor` is still being
+constructed — `createCommandManager()` has not run yet — so a captured `editor.commands` is an
+empty map and every lookup misses silently. That is what broke `u`. Resolve per keypress.
+
+**Keys we take back from vim** (`shouldBypassVim`): the library reads `event.ctrlKey` and never
+looks at `metaKey`, so on macOS every Cmd chord arrives as a bare vim key — Cmd-V entered visual
+mode, Cmd-C started a change operator, Cmd-X deleted a character. Cmd and Alt chords are now
+handed back whole; on non-Apple platforms, where Ctrl is both modifiers, the browser and app keep
+`a c v x z y f` and vim keeps the rest of its Ctrl bindings. Open slash/emoji popups bypass too.
+
+**Touch devices are opted out.** Soft keyboards emit `keydown` with keyCode 229 and no usable
+`key`, so modal editing silently degrades to always-insert.
+
+### The two dependency patches (`patches/vim-prosemirror@0.2.0.patch`)
+
+`VimState.register` is declared in the types but is **dead code** in 0.2.0 — there is no register.
+`y`/`d`/`c`/`x` write to the *system clipboard* and `p` reads it back with
+`navigator.clipboard.read()`, which is permission-gated in Chrome and Safari (a Paste dialog on
+every press) and absent for page script in Firefox. It is also async and unawaited on the write
+side, so `dd` then a fast `p` can race, and its own Markdown re-parser competes with our
+`MarkdownClipboard` extension.
+
+1. `p`/`P` paste the in-memory register synchronously, like vim's unnamed register. Pasting from
+   *outside* the editor stays on Ctrl/Cmd-V — the only path that reaches Docmost's own paste
+   pipeline (image/file upload, markdown transform), which vim's path cannot do.
+2. The register is recorded **before** the `navigator.clipboard` guard, not after. Upstream's
+   early return meant `y`/`d`/`c`/`x` recorded nothing in a non-secure context, so `p` was dead on
+   plain-HTTP self-hosted deployments.
+
+If a third patch becomes necessary, vendor the package into `packages/editor-ext` instead — at
+that point our own vim code outweighs the glue.
+
+### Known gaps
+
+- No `:` ex commands, so no `:%s/pat/rep/g` — tracked in issue #25. `Mod-F` find & replace is
+  unaffected and still works.
+- `Escape` is consumed in normal mode, so it will not close the find dialog from inside the editor.
+- `zz`/`H`/`M`/`L` resolve against the scroll container and are untested against our layout.
+- `vim-prosemirror` publishes ESM with extensionless relative imports, which Node's resolver
+  rejects. Vite backfills the extension; **vitest needs `server.deps.inline`** (see
+  `apps/client/vitest.config.ts`).
 
 ## Adopting a newer upstream release
 

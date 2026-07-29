@@ -76,6 +76,11 @@ import { EditorLinkMenu } from "@/features/editor/components/link/link-menu";
 import ColumnsMenu from "@/features/editor/components/columns/columns-menu.tsx";
 import { TransclusionLookupProvider } from "@/features/editor/components/transclusion/transclusion-lookup-context";
 import { useTranslation } from "react-i18next";
+import {
+  isVimSupportedDevice,
+  setVimModeEnabled,
+} from "@/features/editor/extensions/vim-mode";
+import VimStatusIndicator from "@/features/editor/components/vim/vim-status-indicator";
 
 interface PageEditorProps {
   pageId: string;
@@ -333,6 +338,17 @@ export default function PageEditor({
     },
   });
 
+  // Vim is registered in mainExtensions but inert until an editor opts in, so
+  // toggling the preference never rebuilds the extension array (which would
+  // recreate the collaborative editor).
+  const vimModeEnabled =
+    (currentUser?.user?.settings?.preferences?.vimMode ?? false) &&
+    isVimSupportedDevice();
+
+  useEffect(() => {
+    setVimModeEnabled(editor, vimModeEnabled && editorIsEditable);
+  }, [editor, vimModeEnabled, editorIsEditable]);
+
   const debouncedUpdateContent = useDebouncedCallback((newContent: any) => {
     const pageData = queryClient.getQueryData<IPage>(["pages", slugId]);
 
@@ -437,6 +453,10 @@ export default function PageEditor({
 
             {editor && (
               <SearchAndReplaceDialog editor={editor} editable={editable} />
+            )}
+
+            {editor && editorIsEditable && vimModeEnabled && (
+              <VimStatusIndicator editor={editor} />
             )}
 
             {editor && editorIsEditable && (
