@@ -51,7 +51,6 @@ import {
   listDirtyPages,
   markDirtyPageBlocked,
   selectPagesToResync,
-  type DirtyPageRecord,
 } from "./dirty-pages";
 import { isOfflineEditingEnabled } from "./offline-editing-settings";
 import { getOpenPage } from "./open-page-registry";
@@ -146,10 +145,9 @@ export async function runResyncPass(
       includeBlocked: trigger !== "periodic",
     });
 
-    if (pages.length === 0) {
-      await publishBlocked(deps);
-      return empty;
-    }
+    // The blocked list is published unconditionally after the lock is
+    // released, so nothing more is owed here.
+    if (pages.length === 0) return empty;
 
     deps.log(
       `offline resync: ${pages.length} page(s) to push (${trigger})`,
@@ -164,7 +162,9 @@ export async function runResyncPass(
       // early is what keeps the failure a deferral rather than a wall of
       // 30-second timeouts.
       if (!deps.isOnline()) {
-        summary.deferred += pages.length - summary.synced - summary.blocked;
+        // Assigned, not accumulated: pages already deferred one at a time are
+        // part of the same remainder.
+        summary.deferred = pages.length - summary.synced - summary.blocked;
         break;
       }
 
@@ -385,5 +385,3 @@ function defaultDeps(): ResyncManagerDeps {
     },
   };
 }
-
-export type { DirtyPageRecord };
