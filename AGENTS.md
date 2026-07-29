@@ -37,7 +37,7 @@ On top of the `v0.95.0` base:
   `FORK_ENABLED_FEATURES`. Does not touch the collaboration/persistence path.
 - `feat: MCP page writes (#15)` — adds `create_page` / `update_page` / `delete_page` to the same
   module (see **MCP write surface** below). Also does not touch collaboration/persistence.
-- `spike: vim keybindings` — client-only modal editing in the page editor, off by default
+- `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
   behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
   `updatePreference` branch.
 - other commits not mentioned here
@@ -80,7 +80,7 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
 
-## Vim keybindings (`features/editor/extensions/vim-mode.ts`, spike)
+## Vim keybindings (`features/editor/extensions/vim-mode.ts`, PR #26)
 
 Modal editing in the **page editor only**, off by default behind the `vimMode` user preference
 (same plumbing as `editorToolbar`, straight through `updatePreference` into the existing settings
