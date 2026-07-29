@@ -111,6 +111,34 @@ describe("resyncPage", () => {
     });
   });
 
+  it("reports retry — not blocked — when the connection died after the handshake", async () => {
+    // The handshake latched, then the socket dropped and never came back. The
+    // server refused nothing; telling the user "the page may be locked, or your
+    // access may have changed" would send them hunting for a permissions
+    // problem that does not exist.
+    const { deps } = harness([{ ...HEALTHY, unsyncedChanges: 2 }, DISCONNECTED]);
+
+    await expect(resyncPage("page-1", deps)).resolves.toEqual({
+      status: "retry",
+      reason: "connection-lost",
+    });
+  });
+
+  it("reports retry when the socket reconnected at the deadline but has not re-synced", async () => {
+    // Connected again, handshake still pending: the current connection has not
+    // answered, so a pinned counter says nothing about refusal yet.
+    const { deps } = harness([
+      { ...HEALTHY, unsyncedChanges: 2 },
+      DISCONNECTED,
+      { ...HEALTHY, synced: false, unsyncedChanges: 2 },
+    ]);
+
+    await expect(resyncPage("page-1", deps)).resolves.toEqual({
+      status: "retry",
+      reason: "connection-lost",
+    });
+  });
+
   it("reports blocked when authentication fails with a token that is still valid", async () => {
     const { deps } = harness([{ ...DISCONNECTED, authenticationFailed: true }], {
       isTokenExpired: () => false,

@@ -3,6 +3,7 @@ import {
   CACHE_PREFIX,
   cacheNames,
   cachesToDelete,
+  isCacheableAsset,
   isCacheableResponse,
   isExpired,
   keysToEvict,
@@ -109,5 +110,41 @@ describe("isCacheableResponse", () => {
   it("rejects opaque responses", () => {
     expect(isCacheableResponse(res({ type: "opaque" }))).toBe(false);
     expect(isCacheableResponse(res({ type: "opaqueredirect" }))).toBe(false);
+  });
+});
+
+describe("isCacheableAsset", () => {
+  const res = (contentType: string | null, over: Record<string, unknown> = {}) => ({
+    ok: true,
+    status: 200,
+    type: "basic",
+    redirected: false,
+    headers: { get: (name: string) => (name === "content-type" ? contentType : null) },
+    ...over,
+  });
+
+  it("accepts an ordinary asset response", () => {
+    expect(isCacheableAsset(res("application/javascript"))).toBe(true);
+    expect(isCacheableAsset(res("text/css; charset=utf-8"))).toBe(true);
+    expect(isCacheableAsset(res("font/woff2"))).toBe(true);
+  });
+
+  it("rejects 200 text/html under an asset URL — the SPA catch-all deploy race", () => {
+    // The server answers 200 HTML for ANY unknown path, so a status check alone
+    // would store the app shell in the immutable CacheFirst asset cache, where
+    // it sticks until logout.
+    expect(isCacheableAsset(res("text/html"))).toBe(false);
+    expect(isCacheableAsset(res("text/html; charset=utf-8"))).toBe(false);
+    expect(isCacheableAsset(res("TEXT/HTML"))).toBe(false);
+  });
+
+  it("allows a response with no content type — the catch-all always labels its HTML", () => {
+    expect(isCacheableAsset(res(null))).toBe(true);
+  });
+
+  it("still applies every base rule", () => {
+    expect(isCacheableAsset(res("application/javascript", { ok: false, status: 404 }))).toBe(false);
+    expect(isCacheableAsset(res("application/javascript", { status: 206 }))).toBe(false);
+    expect(isCacheableAsset(res("application/javascript", { type: "opaque" }))).toBe(false);
   });
 });

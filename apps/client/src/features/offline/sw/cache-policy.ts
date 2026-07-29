@@ -95,3 +95,30 @@ export function isCacheableResponse(response: {
     return false;
   return true;
 }
+
+/**
+ * The asset and locale caches must additionally refuse HTML.
+ *
+ * The server's SPA catch-all (`static.module.ts`) answers **200 `text/html`**
+ * for any unknown path, so in the deploy race — an old tab requests a hashed
+ * chunk the new deploy deleted — a status check alone stores the app shell
+ * under a URL that is supposed to hold JavaScript, and CacheFirst then serves
+ * it until logout clears the runtime caches. A missing `Content-Type` is
+ * allowed through: the catch-all always labels its HTML, so an unlabelled
+ * response cannot be it.
+ *
+ * Deliberately NOT applied to `GET /api/files/*`: no `/api` path ever reaches
+ * the catch-all, and a user-uploaded `.html` attachment is a legitimate HTML
+ * payload there.
+ */
+export function isCacheableAsset(response: {
+  ok: boolean;
+  status: number;
+  type: string;
+  redirected?: boolean;
+  headers: { get(name: string): string | null };
+}): boolean {
+  if (!isCacheableResponse(response)) return false;
+  const contentType = response.headers.get("content-type") ?? "";
+  return !contentType.toLowerCase().includes("text/html");
+}

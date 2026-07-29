@@ -38,7 +38,11 @@
  * The distinction between `blocked` and `retry` is the one that matters: a
  * network that died mid-pass must never be reported to the user as "this page
  * could not sync", and a locked page must never be retried forever in silence.
- * The discriminator is whether a handshake was ever observed.
+ * The discriminator is whether a handshake was observed **and the connection is
+ * still live when the timeout expires** — a handshake earlier in the pass does
+ * not mean the server refused anything if the socket then dropped; only a
+ * server that is answering right now and still not draining the counter has
+ * refused.
  */
 
 import type { BlockedReason } from "./dirty-pages";
@@ -53,6 +57,8 @@ export type RetryReason =
   | "no-token"
   /** The handshake never completed inside the timeout. */
   | "no-handshake"
+  /** A handshake completed, but the connection died before the push landed. */
+  | "connection-lost"
   /** The session could not be constructed at all. */
   | "session-failed";
 
@@ -138,9 +144,10 @@ export async function resyncPage(
 
   try {
     const deadline = now() + timeoutMs;
-    // Latched: the server answered our handshake at least once. Everything
-    // downstream of this flag is the difference between "refused" and
-    // "unreachable".
+    // Latched: the server answered our handshake at least once. Necessary for
+    // "refused" but not sufficient — the deadline check below also requires the
+    // connection to be live *now*, or a socket that died mid-push would be
+    // reported as a refusal.
     let handshakeObserved = false;
 
     for (;;) {
@@ -169,9 +176,19 @@ export async function resyncPage(
       }
 
       if (now() >= deadline) {
-        return handshakeObserved
-          ? { status: "blocked", reason: "not-accepted" }
-          : { status: "retry", reason: "no-handshake" };
+        // "The server refused" requires the server to be answering right now:
+        // a live socket whose *current* handshake completed and whose counter
+        // is still pinned. A handshake latched earlier on a connection that has
+        // since dropped — or that reconnected in the last poll and has not
+        // re-synced — is a flaky link, not a refusal; the entry stays queued
+        // and the next pass retries it.
+        if (handshakeObserved && sample.connected && sample.synced) {
+          return { status: "blocked", reason: "not-accepted" };
+        }
+        return {
+          status: "retry",
+          reason: handshakeObserved ? "connection-lost" : "no-handshake",
+        };
       }
 
       await wait(pollMs);
