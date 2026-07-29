@@ -1,0 +1,110 @@
+/**
+ * Offline persistence of the React Query cache.
+ *
+ * `main.tsx` mounts `PersistQueryClientProvider` with {@link offlinePersistOptions}
+ * around the *same* `queryClient` instance it already exported — many modules
+ * import that binding directly (`features/page/queries/page-query.ts`,
+ * `features/editor/page-editor.tsx`), so the client is wrapped, never replaced.
+ *
+ * What this buys: after a reload with no network the app still has the user, the
+ * workspace, the space, the sidebar tree and every page that was visited, so it
+ * boots and renders read-only content instead of a blank screen. The decisions
+ * about *what* may be written, and *when*, live entirely in
+ * `persistence-policy.ts`.
+ */
+
+import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
+import { removeOldestQuery } from "@tanstack/react-query-persist-client";
+import type { PersistedClient, Persister } from "@tanstack/react-query-persist-client";
+import type { QueryClient } from "@tanstack/react-query";
+import { QUERY_CACHE_KEY, queryCacheStorage } from "./persisted-store";
+import { seedQueryOnlineState } from "./online-state";
+import {
+  isSnapshotWorthPersisting,
+  shouldDehydrateQuery,
+} from "./persistence-policy";
+
+// Runs on import, i.e. before `main.tsx` renders and therefore before the first
+// query observer mounts — which is the only moment at which this is still
+// useful. See `seedQueryOnlineState` for why it is load-bearing.
+seedQueryOnlineState();
+
+/**
+ * How long a dehydrated cache stays usable. Long, because the value of offline
+ * mode is exactly that a laptop opened after a fortnight still shows its pages;
+ * short enough that an abandoned profile does not keep content forever.
+ */
+export const QUERY_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Coalesce bursts of cache writes (a page load touches dozens of queries). */
+const PERSIST_THROTTLE_MS = 1_000;
+
+/**
+ * Discard the whole store whenever the client build changes.
+ *
+ * `APP_VERSION` is a Vite `define`, so it is a compile-time constant in the app
+ * and simply absent under vitest — hence the `typeof` guard, which Vite folds to
+ * `typeof "0.95.0"` in a real build.
+ */
+function cacheBuster(): string {
+  return typeof APP_VERSION === "string" ? APP_VERSION : "dev";
+}
+
+const storagePersister = createAsyncStoragePersister({
+  storage: queryCacheStorage,
+  key: QUERY_CACHE_KEY,
+  throttleTime: PERSIST_THROTTLE_MS,
+  // A cache holding many pages can outgrow the origin's quota. Rather than
+  // giving up on persistence entirely, drop the least recently updated query and
+  // try again — the tail of the cache is the least likely to be wanted offline.
+  retry: removeOldestQuery,
+});
+
+/**
+ * Persistence overwrites the store wholesale, so a snapshot taken while the app
+ * cannot reach the server would erase a good offline cache. The guard is here
+ * rather than in the storage layer because this is the only place that can see
+ * what is actually being written.
+ */
+const persister: Persister = {
+  ...storagePersister,
+  persistClient: (client: PersistedClient) =>
+    isSnapshotWorthPersisting(client)
+      ? storagePersister.persistClient(client)
+      : undefined,
+};
+
+export const offlinePersistOptions = {
+  persister,
+  maxAge: QUERY_CACHE_MAX_AGE_MS,
+  buster: cacheBuster(),
+  dehydrateOptions: { shouldDehydrateQuery },
+};
+
+/**
+ * Called once the dehydrated cache has been restored into the client.
+ *
+ * Restoring reintroduces a staleness problem the app did not have before: its
+ * global defaults are `refetchOnMount: false` with a 5 minute `staleTime`, which
+ * used to be harmless because a reload started from an empty cache. With a
+ * persisted cache, a reload would otherwise show yesterday's sidebar and never
+ * refresh it.
+ *
+ * Invalidating with `refetchType: "active"` fixes that at exactly the right
+ * scope: "active" means the queries with a mounted observer, i.e. the ones on
+ * screen — those refetch (invalidation overrides `refetchOnMount`), while the
+ * long tail of restored-but-unused entries stays on disk costing nothing.
+ *
+ * The delay is the point: this runs from the restore promise, before React has
+ * re-rendered with `isRestoring: false` and therefore before a single observer
+ * has mounted. Invalidating then would match nothing at all. Offline it is
+ * skipped outright — the fetches would only park as paused.
+ */
+const RESTORE_INVALIDATE_DELAY_MS = 500;
+
+export function onQueryCacheRestored(queryClient: QueryClient): void {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+  setTimeout(() => {
+    void queryClient.invalidateQueries({ refetchType: "active" });
+  }, RESTORE_INVALIDATE_DELAY_MS);
+}

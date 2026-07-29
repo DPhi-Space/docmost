@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 import APP_ROUTE from "@/lib/app-route.ts";
 import { isCloud } from "@/lib/config.ts";
+import { clearOfflineData } from "@/features/offline/clear-offline-data";
 
 const api: AxiosInstance = axios.create({
   baseURL: "/api",
@@ -68,6 +69,12 @@ api.interceptors.response.use(
 );
 
 function redirectToLogin() {
+  // The session is over — same hygiene as an explicit logout. No query client is
+  // available outside React context, but the full-page navigation below drops
+  // the in-memory cache anyway, and persistence is switched off before the
+  // on-disk copy is erased so nothing can be written back.
+  void clearOfflineData();
+
   const exemptPaths = [
     APP_ROUTE.AUTH.LOGIN,
     APP_ROUTE.AUTH.SIGNUP,
