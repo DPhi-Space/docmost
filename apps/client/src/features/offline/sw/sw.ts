@@ -22,6 +22,7 @@ import {
   SHELL_CACHE_KEY,
   cacheNames,
   cachesToDelete,
+  isCacheableAsset,
   isCacheableResponse,
   isExpired,
   keysToEvict,
@@ -177,7 +178,7 @@ async function warmOptional(): Promise<boolean> {
     try {
       if (await cache.match(url)) continue;
       const response = await fetch(url);
-      if (isCacheableResponse(response)) {
+      if (isCacheableAsset(response)) {
         await cache.put(url, response);
         consecutiveFailures = 0;
       } else {
@@ -299,10 +300,24 @@ async function handleNavigation(request: Request): Promise<Response> {
 }
 
 /**
- * CacheFirst. Every URL routed here is content-hashed (or a versioned shell
- * file), so a hit is by definition current.
+ * Keeps the worker alive for a background cache write without holding up the
+ * response it was cloned from (`event.waitUntil`). `cache.put` consumes its
+ * body as the download arrives, so awaiting it on the response path delays
+ * first byte by the full download time — a large image would render
+ * all-at-once at the end instead of progressively.
  */
-async function handleAsset(request: Request): Promise<Response> {
+type ExtendLifetime = (work: Promise<unknown>) => void;
+
+/**
+ * CacheFirst. Every URL routed here is content-hashed (or a versioned shell
+ * file), so a hit is by definition current. `isCacheableAsset` rather than
+ * `isCacheableResponse`: the SPA catch-all answers 200 HTML for a chunk a
+ * newer deploy has deleted, and this cache is treated as immutable.
+ */
+async function handleAsset(
+  request: Request,
+  extendLifetime: ExtendLifetime,
+): Promise<Response> {
   const precache = await caches.open(NAMES.precache);
   const precached = await precache.match(request, { ignoreSearch: true });
   if (precached) return precached;
@@ -312,9 +327,14 @@ async function handleAsset(request: Request): Promise<Response> {
   if (cached) return cached;
 
   const response = await fetch(request);
-  if (isCacheableResponse(response)) {
-    await runtime.put(request, response.clone());
-    await trim(runtime, MAX_ASSET_ENTRIES);
+  if (isCacheableAsset(response)) {
+    const copy = response.clone();
+    extendLifetime(
+      (async () => {
+        await runtime.put(request, copy);
+        await trim(runtime, MAX_ASSET_ENTRIES);
+      })(),
+    );
   }
   return response;
 }
@@ -326,7 +346,7 @@ async function handleLocale(request: Request): Promise<Response> {
 
   const network = fetch(request)
     .then(async (response) => {
-      if (isCacheableResponse(response)) {
+      if (isCacheableAsset(response)) {
         await cache.put(request, response.clone());
         await trim(cache, MAX_LOCALE_ENTRIES);
       }
@@ -345,13 +365,23 @@ async function handleLocale(request: Request): Promise<Response> {
  * `cache: "no-store"`), with a bounded offline fallback so previously viewed
  * images and attachments still render.
  */
-async function handleApiFile(request: Request): Promise<Response> {
+async function handleApiFile(
+  request: Request,
+  extendLifetime: ExtendLifetime,
+): Promise<Response> {
   const cache = await caches.open(NAMES.files);
   try {
     const response = await fetchWithTimeout(request, FILE_TIMEOUT_MS);
     if (isCacheableResponse(response)) {
-      await putStamped(cache, request, response);
-      await trim(cache, MAX_FILE_ENTRIES);
+      // `putStamped` clones synchronously, before the caller starts consuming
+      // the body it was handed.
+      const stamped = putStamped(cache, request, response);
+      extendLifetime(
+        (async () => {
+          await stamped;
+          await trim(cache, MAX_FILE_ENTRIES);
+        })(),
+      );
     }
     return response;
   } catch {
@@ -363,7 +393,7 @@ async function handleApiFile(request: Request): Promise<Response> {
 
 const HANDLERS: Record<
   Exclude<RouteKind, "passthrough">,
-  (request: Request) => Promise<Response>
+  (request: Request, extendLifetime: ExtendLifetime) => Promise<Response>
 > = {
   navigation: handleNavigation,
   asset: handleAsset,
@@ -389,5 +419,5 @@ sw.addEventListener("fetch", (event) => {
   // First handled request of this worker's life: start the best-effort warm-up.
   if (optionalWarming === null) event.waitUntil(ensureOptionalWarmed());
 
-  event.respondWith(HANDLERS[kind](request));
+  event.respondWith(HANDLERS[kind](request, (work) => event.waitUntil(work)));
 });
