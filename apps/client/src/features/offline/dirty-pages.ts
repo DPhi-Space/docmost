@@ -126,7 +126,7 @@ export async function recordDirtyPage(
   link?: DirtyPageLink,
   backend?: DirtyPageBackend,
   now: number = Date.now(),
-): Promise<void> {
+): Promise<boolean> {
   try {
     const store = backend ?? defaultBackend();
     const existing = await store.get(pageId);
@@ -138,8 +138,12 @@ export async function recordDirtyPage(
       // A later edit may know more about the page than the first one did.
       link: link ?? existing?.link,
     });
+    return true;
   } catch {
-    // Best effort by design; see above.
+    // Reported rather than swallowed: a page that could not be registered is a
+    // page a later session-expiry will not know to preserve, so the caller gets
+    // the chance to say so out loud.
+    return false;
   }
 }
 
@@ -174,6 +178,111 @@ export async function markDirtyPageBlocked(
     await store.set(pageId, { ...existing, blocked: { reason, at: now } });
   } catch {
     // The entry stays un-marked and is retried on the next pass.
+  }
+}
+
+/**
+ * Who the data in this store — and the `page.*` documents it indexes — belongs
+ * to.
+ *
+ * Held **in IndexedDB, beside the data**, not in localStorage. The two must not
+ * be separable: a browser holding one user's preserved offline documents with
+ * another user's (or no) owner record is exactly the cross-account leak this
+ * exists to prevent, and localStorage is cleared, blocked and per-origin-quota'd
+ * independently of IndexedDB.
+ *
+ * It is stored under a reserved key inside the dirty-page store rather than in
+ * a store of its own, because it must survive and disappear with precisely the
+ * same records it describes. `isDirtyPageRecord` filters it out of every listing
+ * (it has no `pageId`), so nothing else has to know it is there.
+ */
+export const OFFLINE_DATA_OWNER_RECORD_KEY = "__offline-data-owner";
+
+export interface OfflineDataOwnerRecord {
+  ownerUserId: string;
+  at: number;
+}
+
+function isOwnerRecord(value: unknown): value is OfflineDataOwnerRecord {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as OfflineDataOwnerRecord).ownerUserId === "string"
+  );
+}
+
+/** Stamp the store with its owner. Returns false if it could not be written. */
+export async function setOfflineDataOwner(
+  ownerUserId: string,
+  backend?: DirtyPageBackend,
+  now: number = Date.now(),
+): Promise<boolean> {
+  try {
+    const store = backend ?? defaultBackend();
+    await store.set(OFFLINE_DATA_OWNER_RECORD_KEY, {
+      ownerUserId,
+      at: now,
+    } as unknown as DirtyPageRecord);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the owner stamp.
+ *
+ * Three answers, and the caller must treat two of them the same way:
+ * `{ status: "none" }` — nothing is preserved, nothing to protect;
+ * `{ status: "known", ownerUserId }` — compare it;
+ * `{ status: "unreadable" }` — **assume the worst**, because an unreadable
+ * store is indistinguishable from one holding somebody else's work.
+ */
+export type OfflineDataOwner =
+  | { status: "none" }
+  | { status: "known"; ownerUserId: string }
+  | { status: "unreadable" };
+
+export async function readOfflineDataOwner(
+  backend?: DirtyPageBackend,
+): Promise<OfflineDataOwner> {
+  try {
+    const raw = await (backend ?? defaultBackend()).get(
+      OFFLINE_DATA_OWNER_RECORD_KEY,
+    );
+    if (raw === undefined) return { status: "none" };
+    return isOwnerRecord(raw)
+      ? { status: "known", ownerUserId: raw.ownerUserId }
+      : { status: "unreadable" };
+  } catch {
+    return { status: "unreadable" };
+  }
+}
+
+/**
+ * Every page with unpushed edits, together with whether the store could be read
+ * at all.
+ *
+ * The distinction is load-bearing for session expiry: `listDirtyPages`
+ * answering `[]` for an unreadable store reads as "nothing is pending", and
+ * "nothing is pending" is what licenses deleting every `page.*` database. An
+ * unreadable registry must mean *preserve*, not *erase*.
+ */
+export type DirtyPagesRead =
+  | { readable: true; records: DirtyPageRecord[] }
+  | { readable: false };
+
+export async function readDirtyPages(
+  backend?: DirtyPageBackend,
+): Promise<DirtyPagesRead> {
+  try {
+    const rows = await (backend ?? defaultBackend()).entries();
+    return {
+      readable: true,
+      records: rows.map(([, record]) => record).filter(isDirtyPageRecord),
+    };
+  } catch {
+    return { readable: false };
   }
 }
 

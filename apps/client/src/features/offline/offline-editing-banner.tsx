@@ -6,8 +6,10 @@
  * collaboration-adjacent file carries no UI at all.
  *
  * Every state is also gated on the offline-editing switch: with the switch off
- * this component renders nothing, which is what "byte-identical to the base
- * release" has to mean visually as well as behaviourally.
+ * this component renders nothing, so the *editor* looks exactly as it does on
+ * the base release. (Phase 1b's connectivity pill is a separate, unconditional
+ * component and does still appear — see `offline-editing-settings.ts` for what
+ * the switch does and does not cover.)
  */
 
 import { Alert } from "@mantine/core";

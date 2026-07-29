@@ -181,10 +181,62 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   empty cache and would otherwise pin a reloaded tab to yesterday's sidebar forever. The delay
   before invalidating is load-bearing: the callback fires before React has re-rendered, so no
   observer is active yet and `refetchType: "active"` would match nothing.
-- **`clearOfflineData()` runs on both session exits** (`handleLogout` and the 401 handler's
-  `redirectToLogin`). It stops persistence *first* so a throttled write cannot restore what it
-  erases, then drops the dehydrated cache, every `page.*` y-indexeddb database (a pre-existing
-  leak that predates this work) and the SW runtime caches. Two deliberate omissions:
+- **The two session exits are NOT the same call, and must not be re-unified.** `handleLogout`
+  runs `clearOfflineData()`; the 401 handler's `redirectToLogin` runs
+  `clearOfflineDataOnSessionExpiry()` (`session-expiry.ts`). ⚠️ **This is a deliberate,
+  documented narrowing of #18's stated behaviour, justified by phases 2/3 changing what is at
+  stake since #18 was written.** #18 specified cleanup on both exits for *privacy on a shared
+  machine*, when a `page.<pageId>` database held nothing but a cached copy of content the server
+  already had. Since phase 2 it can hold the **only** copy of the user's work, and since phase 3
+  the dirty registry is the only index of which ones do — so the original behaviour meant a
+  token expiring after a long offline period, "log out all devices", an admin revoking a
+  session, or a server restart with a rotated `APP_SECRET` silently and permanently destroyed
+  unsynced edits. Found by an adversarial audit and reproduced end to end.
+  An explicit logout is the user saying they are done with this device: it still erases
+  everything, unconditionally. A 401 is *the session expired*, not *the user left*, so it keeps
+  exactly what is needed to recover the work — the `page.*` database of every page the dirty
+  registry lists, the sync markers for **those pages only** (a marker without its document is
+  the state the gate now refuses to trust), and the registry itself — and erases everything
+  else. With nothing pending it is byte-for-byte the logout path.
+- **Preserved data must be provably owned, and the readers enforce it themselves**
+  (`data-ownership.ts`). The first version of the 401 fix preserved first and settled ownership
+  later, from a localStorage note that one cleanup hook consulted — and an audit reached the
+  *next user's session* through it three ways: an unrecorded owner read as "same user"; the hook
+  gated on the offline-editing switch, so declining the feature declined the privacy cleanup;
+  and the hook consuming its notice on the first sign-in while leaving the data, so the second
+  sign-in found no notice and checked nothing. Every one ended with the previous user's text on
+  screen **and pushed to the server under the new user's identity**. Four rules now hold, and
+  they are deliberately redundant because three failures of one hook is a diagnosis:
+  1. **Nothing is preserved without a provable owner.** No owner hint, or the IndexedDB stamp
+     cannot be written ⇒ this is the logout path, work included. Losing work in a case that
+     should not arise beats handing it to a stranger.
+  2. **The owner lives beside the data**, under a reserved key *in the dirty-page store*, not in
+     localStorage. localStorage carries only a hint, because the axios 401 handler has no async
+     boundary to read IndexedDB on; it is never what a reader trusts.
+  3. **Reconciliation is triggered by the presence of the data**, never by a notice, and runs
+     **unconditionally on sign-in** — `useOfflineDataOwnership()` takes no `enabled` argument, so
+     there is nowhere for the switch to be consulted. Mismatch *or* unreadable ⇒ erase.
+  4. **The readers refuse on their own account.** `offlineDataIsOurs()` starts false; the editing
+     gate and the resync manager both require it. A missed cleanup degrades to "data sits inert
+     on disk" instead of "data appears in someone else's session".
+  What this does **not** cover, stated plainly: `page-editor.tsx` binds `IndexeddbPersistence`
+  for every page it opens, and that is collaboration code the fork does not touch — so a foreign
+  document still on disk when a page is opened would merge. Rules 1 and 3 are what stop such a
+  document existing; rule 4 is defence in depth for the window in between.
+  The preservation is announced: a notice is written for the login page
+  (`unsynced-recovery-notice.tsx`) and the resync manager pushes the edits on the next sign-in.
+  The notice is an announcement only — **never a trigger for anything**, which is what leak (3)
+  was.
+- **Preservation follows what the user was promised.** `dirty-tracking.ts` records edits made
+  while the provider is *disconnected*, but the phase-2 "your changes could not be saved to the
+  server" banner appears on a *connected* session whose writes the server refuses. Those edits
+  are registered too, from the same tick that raises the banner, so the preservation set matches
+  the promise. And an **unreadable registry preserves everything** rather than reading as
+  "nothing is pending" — that reading is precisely how the original defect destroyed work.
+- **`clearOfflineData()` itself** stops persistence *first* so a throttled write cannot restore
+  what it erases, then drops the dehydrated cache, every `page.*` y-indexeddb database (a
+  pre-existing leak that predates this work) and the SW runtime caches. Two deliberate
+  omissions:
   it **keeps the build's precache** (compiled assets only, and an activated worker never re-runs
   `install`, so deleting it would break offline boot until the next deploy); and it **does not
   `deleteDatabase` its own store**, only clears its records — idb-keyval holds the connection
@@ -217,18 +269,32 @@ The patch is 24 lines (`+17 −7`) and consists of exactly four things:
 Provider creation/destruction (`providersRef`), `IndexeddbPersistence` usage, and the ydoc are
 untouched. No ydoc is ever seeded from REST content.
 
-**The invariant.** *A document that has never completed a real remote sync in this browser is
-never editable.* `sync-markers.ts` writes a per-page marker only when the **provider instance's
-own** `synced` is true on a `Connected` socket, so the marker means y-indexeddb holds real
-server content, never an empty shell — which is precisely what upstream's regression let become
-authoritative. `canEditWithoutConnection()` is pure and its sixteen-row truth table is a test.
+**The invariant.** *A document that has never completed a real remote sync in this browser, and
+is not actually holding content right now, is never editable.* `sync-markers.ts` writes a
+per-page marker only when the **provider instance's own** `synced` is true on a `Connected`
+socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table is a test.
 
-- The gate reads the provider through `providersRef` **itself**, not `providersRef.current`.
-  `PageEditor` is not remounted when the route changes — only the `pageId` prop changes — and
-  `page-editor.tsx` never resets `isLocalSynced` / `isRemoteSynced` on that change, so a value
-  captured during render can belong to a provider that has since been destroyed. A destroyed
-  provider still reports `synced === true`, which would mark a page the server never
-  acknowledged. Same reason the hook holds *which page* is known synced rather than a boolean.
+- **The marker alone is not enough, and the code no longer pretends it is.** The marker store
+  and the page's `page.<pageId>` document are two independent IndexedDB databases and can
+  disagree: delete only the document and the marker survives, `isLocalSynced` goes true for the
+  empty database exactly as for a populated one, and the gate opened a **live, editable, blank**
+  editor above the words "changes are saved locally". Found by an adversarial audit of the
+  merged phases. The predicate now also requires `hasDocContent()` (`doc-content.ts`), which
+  asks the document itself via `Y.encodeStateVector` — a doc nothing has ever been written to
+  encodes to a single zero byte. A *synced but empty* page still opens; "never synced" is the
+  state being rejected.
+- The gate reads the provider through `providersRef` **itself**, not `providersRef.current`,
+  because the effect that builds the providers runs *after* the render that calls the hook — so
+  a value captured during render is null on the first pass and can be stale afterwards. A
+  destroyed provider still reports `synced === true`, which would mark a page the server never
+  acknowledged. **An earlier version of this note justified the ref by claiming `PageEditor` is
+  not remounted across navigation. That is false** — `pages/page/page.tsx:169` puts
+  `key={page.id}` on the memoized editor — and the code was safe only through React's
+  declaration-order effect execution across two files, an untested cross-file invariant that any
+  move of the hook call or switch to `useLayoutEffect` would have broken silently. The bundle in
+  `providersRef` now carries its own `pageId` and the hook refuses to act unless it matches the
+  page it was asked about, which is a local, tested condition. The hook still holds *which page*
+  is known synced (and which is known populated) rather than a boolean, for the same reason.
 - The gate also requires `navigator.onLine === false`. Not in the issue's predicate; added so
   that every behavioural difference is confined to sessions with no network — an ordinary online
   session takes the same path with the switch on as with it off, including the data-loss repro.
@@ -247,10 +313,19 @@ authoritative. `canEditWithoutConnection()` is pure and its sixteen-row truth ta
 - **The switch is `localStorage`, default off** (`offline-editing-settings.ts`, key
   `docmost.offline-editing`), not a server-side user preference: the fork makes no
   `apps/server/` changes here, and a setting that gates *offline* behaviour has to be readable
-  on the boot where there is no network. With it off, nothing is read or written, no marker
-  database is created, no banner renders and the title editor behaves exactly as upstream — that
-  is what makes the phase safe to merge. Consequence: a page must be opened online **after**
-  the switch is turned on before it can be edited offline.
+  on the boot where there is no network. With it off, nothing in phases 2/3 is read or written,
+  neither the marker nor the dirty-page database is created, no banner renders, no background
+  sync loop exists and the title editor behaves exactly as upstream — that is what makes the
+  phase safe to merge. Consequence: a page must be opened online **after** the switch is turned
+  on before it can be edited offline.
+  One exception: the cross-account ownership check runs regardless of the switch (see the
+  session-exit section above), so `docmost-offline-dirty` is created — empty, never written to —
+  on every authenticated boot. A safeguard that a feature toggle can disable is not a safeguard.
+  **The switch does not make the app byte-identical to upstream, only the editor.** Phases 1a
+  and 1b are unconditional by design: the service worker registers and precaches, the query
+  cache is dehydrated into `docmost-offline`, the update check runs every 30 minutes and the
+  "Offline — showing saved content" pill appears, switch or no switch. Earlier wording here and
+  in `offline-editing-settings.ts` said "byte-identical to upstream" without that qualification.
 - **The page title stays offline-disabled** (tooltip: "Title editing requires a connection").
   It is not in the Yjs document — `title-editor.tsx` saves it through a debounced
   `POST /api/pages/update` with no optimistic write and no retry — so an offline title edit is

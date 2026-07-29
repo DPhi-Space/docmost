@@ -36,7 +36,10 @@ import { dirtyPageHref } from "./dirty-page-link";
 import { useOfflineEditingEnabled } from "./offline-editing-settings";
 import { useOnlineStatus } from "./online-state";
 import { useResyncState } from "./resync-state";
-import { useOfflineResync } from "./use-offline-resync";
+import {
+  useOfflineDataOwnership,
+  useOfflineResync,
+} from "./use-offline-resync";
 import classes from "./resync-indicator.module.css";
 
 export function ResyncIndicator() {
@@ -189,6 +192,10 @@ function blockedReasonText(
  * session's rather than the pill's.
  */
 export function ResyncManagerHost() {
+  // Ownership is settled unconditionally — it is a privacy control, and gating
+  // it on the feature switch is one of the three ways the cross-account leak
+  // was reached. Only the loop itself follows the switch.
+  useOfflineDataOwnership();
   const enabled = useOfflineEditingEnabled();
   useOfflineResync(enabled);
   return null;

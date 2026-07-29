@@ -65,6 +65,20 @@ describe("resyncPage", () => {
   it("does not call it success while the stored document is still replaying", async () => {
     // A zero counter before y-indexeddb has finished only means there was
     // nothing to send yet — the offline edit has not even reached the doc.
+    //
+    // Held to the *timeout*, not to a later success: an earlier version of this
+    // case scripted a healthy sample at the end, so it passed with the
+    // `localSynced` guard deleted. The whole point is that a replay which never
+    // completes is never reported as pushed.
+    const { deps } = harness([{ ...HEALTHY, localSynced: false }]);
+
+    await expect(resyncPage("page-1", deps)).resolves.toEqual({
+      status: "blocked",
+      reason: "not-accepted",
+    });
+  });
+
+  it("succeeds once the replay finishes, on the very next sample", async () => {
     const { deps } = harness([
       { ...HEALTHY, localSynced: false },
       { ...HEALTHY, localSynced: false },

@@ -23,6 +23,15 @@
  * with a SyncStep2 carrying everything the server lacks. That is the same
  * mechanism that pushes them today when the user re-opens the page — this file
  * only removes the requirement that they do.
+ *
+ * ## Why the constructors are injectable
+ *
+ * They are reached through a `ResyncSessionDeps` bundle whose default is the
+ * four real classes, so the production path is unchanged. The point is that
+ * this file was the riskiest on the branch and had **no coverage at all**: a
+ * WebSocket and an IndexedDB connection cannot be had in jsdom, so the only way
+ * to pin the ordering, the teardown and the sample mapping — which is where the
+ * risk actually lives — is to be able to stand in for them.
  */
 
 import {
@@ -41,6 +50,69 @@ export function pageDocumentName(pageId: string): string {
   return `page.${pageId}`;
 }
 
+/** The Yjs document, as this file uses it: created, passed along, destroyed. */
+export interface SessionDoc {
+  destroy(): void;
+}
+
+export interface SessionPersistence {
+  /** y-indexeddb sets this once the stored document has been replayed. */
+  readonly synced: boolean;
+  on(event: "synced", handler: () => void): void;
+  destroy(): void;
+}
+
+export interface SessionSocket {
+  destroy(): void;
+}
+
+export interface SessionProvider {
+  readonly synced: boolean;
+  readonly unsyncedChanges: number;
+  attach(): void;
+  destroy(): void;
+}
+
+export interface SessionProviderConfig {
+  websocketProvider: SessionSocket;
+  name: string;
+  document: SessionDoc;
+  token: string;
+  onStatus(event: { status: string }): void;
+  onAuthenticationFailed(): void;
+}
+
+export interface ResyncSessionDeps {
+  createDoc(): SessionDoc;
+  createPersistence(name: string, doc: SessionDoc): SessionPersistence;
+  createSocket(url: string): SessionSocket;
+  createProvider(config: SessionProviderConfig): SessionProvider;
+  collaborationUrl(): string;
+}
+
+/**
+ * The real classes, in the order and with the arguments `page-editor.tsx` uses.
+ * The casts are at the boundary only: the structural interfaces above describe
+ * a subset of each class, and every object handed across is the genuine one.
+ */
+export const realSessionDeps: ResyncSessionDeps = {
+  createDoc: () => new Y.Doc(),
+  createPersistence: (name, doc) =>
+    new IndexeddbPersistence(name, doc as Y.Doc),
+  createSocket: (url) => new HocuspocusProviderWebsocket({ url }),
+  createProvider: (config) =>
+    new HocuspocusProvider({
+      websocketProvider: config.websocketProvider as HocuspocusProviderWebsocket,
+      name: config.name,
+      document: config.document as Y.Doc,
+      token: config.token,
+      onStatus: (event: onStatusParameters) =>
+        config.onStatus({ status: event.status }),
+      onAuthenticationFailed: config.onAuthenticationFailed,
+    }),
+  collaborationUrl: getCollaborationUrl,
+};
+
 /**
  * Open a session for `pageId`, authenticated with `token`.
  *
@@ -52,32 +124,33 @@ export function pageDocumentName(pageId: string): string {
 export async function openResyncSession(
   pageId: string,
   token: string,
+  deps: ResyncSessionDeps = realSessionDeps,
 ): Promise<ResyncSession> {
   const documentName = pageDocumentName(pageId);
-  const ydoc = new Y.Doc();
+  const ydoc = deps.createDoc();
 
-  let local: IndexeddbPersistence | undefined;
-  let socket: HocuspocusProviderWebsocket | undefined;
-  let remote: HocuspocusProvider | undefined;
+  let local: SessionPersistence | undefined;
+  let socket: SessionSocket | undefined;
+  let remote: SessionProvider | undefined;
 
   try {
     let localSynced = false;
     let connected = false;
     let authenticationFailed = false;
 
-    local = new IndexeddbPersistence(documentName, ydoc);
+    local = deps.createPersistence(documentName, ydoc);
     local.on("synced", () => {
       localSynced = true;
     });
 
-    socket = new HocuspocusProviderWebsocket({ url: getCollaborationUrl() });
+    socket = deps.createSocket(deps.collaborationUrl());
 
-    remote = new HocuspocusProvider({
+    remote = deps.createProvider({
       websocketProvider: socket,
       name: documentName,
       document: ydoc,
       token,
-      onStatus: (event: onStatusParameters) => {
+      onStatus: (event) => {
         connected = event.status === WebSocketStatus.Connected;
       },
       // No refetch-and-reconnect dance here, unlike the editor's handler: the
@@ -100,6 +173,8 @@ export async function openResyncSession(
 
     return {
       sample: () => ({
+        // Either signal will do: the event may have fired before this closure
+        // existed, in which case the flag on the instance is the record of it.
         localSynced: localSynced || persistence.synced,
         connected,
         synced: provider.synced,
