@@ -17,6 +17,7 @@
 import { Group, Paper, Text, Transition } from "@mantine/core";
 import { IconWifiOff } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
+import { useCollabConnectionWatch } from "./collab-connection-watch";
 import { useOnlineStatus } from "./online-state";
 import { ResyncIndicator, ResyncManagerHost } from "./resync-indicator";
 import classes from "./offline-indicator.module.css";
@@ -24,6 +25,11 @@ import classes from "./offline-indicator.module.css";
 export function OfflineIndicator() {
   const { t } = useTranslation();
   const isOnline = useOnlineStatus();
+  // Feeds the collaboration socket's own view of the network into the
+  // reachability verdict this pill renders. Hosted here because this component is
+  // already mounted once per authenticated session, so no collaboration file
+  // gains a line (`collab-connection-watch.ts`).
+  useCollabConnectionWatch();
 
   return (
     <>

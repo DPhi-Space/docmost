@@ -2,6 +2,10 @@ import axios, { AxiosInstance } from "axios";
 import APP_ROUTE from "@/lib/app-route.ts";
 import { isCloud } from "@/lib/config.ts";
 import { clearOfflineDataOnSessionExpiry } from "@/features/offline/session-expiry";
+import {
+  reportNetworkFailure,
+  reportNetworkSuccess,
+} from "@/features/offline/reachability";
 
 const api: AxiosInstance = axios.create({
   baseURL: "/api",
@@ -10,6 +14,12 @@ const api: AxiosInstance = axios.create({
 
 api.interceptors.response.use(
   (response) => {
+    // The server answered, so it is reachable — the strongest connectivity
+    // signal the app has, and free (`features/offline/reachability.ts`). An app
+    // in use therefore needs no probes at all, and a wrong "offline" verdict
+    // cannot outlive the next successful request.
+    reportNetworkSuccess();
+
     // we need the response headers for these endpoints
     const exemptEndpoints = [
       "/api/pages/export",
@@ -27,6 +37,14 @@ api.interceptors.response.use(
     return response.data;
   },
   (error) => {
+    // No `response` means nothing came back at all: DNS, connect, TLS or a
+    // timeout. A *hint* that the network is gone, never a verdict — an aborted
+    // request is not evidence of anything, and any HTTP status, including 500,
+    // proves the round trip completed.
+    if (!error.response && error.code !== "ERR_CANCELED") {
+      reportNetworkFailure();
+    }
+
     if (error.response) {
       switch (error.response.status) {
         case 401: {

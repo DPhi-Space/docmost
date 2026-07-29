@@ -26,6 +26,7 @@ import { getMyInfo } from "@/features/user/services/user-service";
 import { reconcileOfflineDataOwnership } from "./data-ownership";
 import { setDirtyPageLinkResolver } from "./dirty-page-link";
 import { setOfflineDataOwner } from "./dirty-pages";
+import { whenServerReachable } from "./reachability";
 import { createResyncManager, type ResyncManager } from "./resync-manager";
 import { resetResyncState } from "./resync-state";
 import { clearPendingRecovery, rememberOfflineDataOwner } from "./session-expiry";
@@ -64,9 +65,19 @@ async function resolveCurrentUserId(
   const cached = () =>
     queryClient.getQueryData<ICurrentUser>(["currentUser"])?.user?.id ?? null;
 
-  // Asking while offline is pointless and the answer is knowable: nobody can
-  // have signed in without the server, so the cached user is the only user.
-  if (globalThis.navigator?.onLine === false) return cached();
+  /**
+   * Asking while offline is pointless and the answer is knowable: nobody can
+   * have signed in without the server, so the cached user is the only user.
+   *
+   * **Awaited, not read.** This used to test `navigator.onLine === false`, which
+   * is `true` throughout the VPN case (`reachability.ts`) — so a cold boot with
+   * no network took the branch below instead, `getMyInfo()` failed, ownership
+   * refused to settle, and *offline editing did not work at all*: the gate
+   * requires `offlineDataIsOurs`. Waiting for the first evidence-backed verdict
+   * is what makes an offline boot resolve to the cached user. It always resolves,
+   * bounded by the probe's timeout.
+   */
+  if (!(await whenServerReachable())) return cached();
 
   try {
     const me = await getMyInfo();

@@ -43,6 +43,10 @@ On top of the `v0.95.0` base:
   collaboration path; **#19 is the fork's one deliberate exception**, a 24-line patch to
   `page-editor.tsx` that must be re-implemented by hand if the base ever moves past upstream's
   collab rewrite. #20 adds *no further* lines to that patch.
+- `fix(offline): detect offline by reachability, not navigator.onLine` — the whole of #18–#20
+  turned on `navigator.onLine`, which reports `true` with no network at all whenever a VPN
+  interface is up, so offline editing did not work on a real deployment. See **Detecting offline**
+  below. Still zero `apps/server/` changes and *no further* lines in `page-editor.tsx`.
 - `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
   behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
   `updatePreference` branch.
@@ -176,13 +180,15 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   a live JWT and must never appear on the list — that is asserted by test, as is every other
   excluded family (search keys have unbounded key cardinality, `notifications` is registered
   `gcTime: 0`).
-- **React Query's `onlineManager` must be seeded from `navigator.onLine` at boot**
-  (`online-state.ts`). It initialises to `online = true` and only ever reacts to `online` /
-  `offline` *events*, so a tab loaded while already offline never learns the truth: instead of
-  pausing fetches it runs every restored query into a network error. That single default is what
-  stands between a persisted cache and a usable offline app — without the seed the app renders
-  "Error fetching page data." on top of a perfectly good cache, *and* the errored cache is then
-  written over the good one. Both were observed in a browser.
+- **React Query's `onlineManager` must be driven by us, not by its own listener**
+  (`online-state.ts` → `installQueryOnlineManager`). It initialises to `online = true` and by
+  default only ever reacts to `online` / `offline` *events*, so a tab loaded while already offline
+  never learns the truth: instead of pausing fetches it runs every restored query into a network
+  error. That single default is what stands between a persisted cache and a usable offline app —
+  without it the app renders "Error fetching page data." on top of a perfectly good cache, *and*
+  the errored cache is then written over the good one. Both were observed in a browser. It was
+  originally a one-shot seed from `navigator.onLine`; it is now a subscription to the reachability
+  verdict, because on a VPN the events never fire at all (see **Detecting offline** below).
 - **A snapshot is only written if it contains `currentUser`** (`isSnapshotWorthPersisting`).
   Persistence replaces the store wholesale and only successful queries are dehydrated, so a
   session that cannot reach the server would otherwise erase a good offline cache. Measured: one
@@ -320,11 +326,14 @@ socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table 
   `providersRef` now carries its own `pageId` and the hook refuses to act unless it matches the
   page it was asked about, which is a local, tested condition. The hook still holds *which page*
   is known synced (and which is known populated) rather than a boolean, for the same reason.
-- The gate also requires `navigator.onLine === false`. Not in the issue's predicate; added so
-  that every behavioural difference is confined to sessions with no network — an ordinary online
-  session takes the same path with the switch on as with it off, including the data-loss repro.
-  A session that is nominally online but cannot reach the collab server therefore stays
-  read-only, exactly as today.
+- The gate also requires that **the server is unreachable** (`reachability.ts`, see **Detecting
+  offline** below). Not in the issue's predicate; added so that every behavioural difference is
+  confined to sessions that cannot reach the server — an ordinary session takes the same path
+  with the switch on as with it off, including the data-loss repro. This term read
+  `navigator.onLine === false` until it was found to be **the reason offline editing did not work
+  at all on a machine with a VPN configured**; a session that can reach the API but not the
+  collaboration WebSocket (blocked upgrade, hostile proxy) still stays read-only, since the probe
+  is an HTTP request.
 - **Dropped writes are surfaced, never resolved by discarding.** The server marks a connection
   `readOnly` for space READERs, page-level restrictions, **the fork's page lock** and trashed
   pages (`authentication.extension.ts`), then answers each update with `SyncStatus(false)`.
@@ -430,6 +439,80 @@ the next reconnect, boot or review; and the manager pushes Yjs content only — 
 offline is still lost, since titles are REST-only (#19's note stands). An outbox for titles
 remains out of scope, as does #21's attachment outbox, which will plug its replay into this same
 manager.
+
+### Detecting offline (`reachability.ts`) — ⚠️ `navigator.onLine` is not it
+
+Everything above depends on one question, and for phases 1b–3 that question was answered by
+`navigator.onLine`. **It is not a reachability signal**, and on a real deployment it broke the
+feature outright: with a VPN configured, both Chrome and Safari keep reporting
+`navigator.onLine === true` after Wi-Fi is switched off, because the tunnel's virtual interface
+(`utun*` on macOS) is still up. The spec only makes `false` meaningful — `true` means an interface
+exists. Captive portals, an Ethernet cable into a dead switch and bridged VM adapters all do the
+same thing.
+
+Every consumer was wrong at once, and one of them silently: the #19 gate never opened, so offline
+editing did nothing; React Query was never paused, so restored queries errored on top of a good
+cache; and because the property never *transitions*, **neither `online` nor `offline` ever fires**
+— so the #20 reconnect trigger did not exist either and pending edits waited for the ten-minute
+periodic timer.
+
+- **The question is "can we reach *this* server", never "is there internet".** For a self-hosted
+  install a third-party probe is wrong in both directions — a server reachable only across the VPN
+  is up with no internet at all, and a working connection says nothing when the container is down
+  — besides sending a request somewhere the operator did not choose.
+- **The probe is `GET /api/health/live`, and every property that makes it the right target is a
+  property of this deployment**, verified in the tree rather than assumed: it returns `ok` without
+  touching Postgres or Redis, `HealthController` carries no `JwtAuthGuard` (guards are
+  per-controller; there is no global one), it is excluded from `DomainMiddleware`, from the
+  `workspaceId` preHandler and from request logging, and only `auth.controller.ts` is rate limited.
+  **Zero server changes**, which is what keeps the offline feature's promise about `apps/server/`.
+- **The service worker must never be allowed to answer it.** `sw/routes.ts` passes through every
+  `/api/` path except `/api/files/`, and a test asserts the classification *from the probe
+  constant*. `cache: "no-store"` governs the HTTP cache and says nothing about Cache Storage, so a
+  probe the worker could serve would report a server unreachable for a week as up.
+- **Any HTTP response counts as reachable, including 404 and 502.** The question is whether packets
+  completed a round trip, not whether the server is well: a reverse proxy that does not forward
+  this one path must not be able to convince the app it is offline. Only a transport failure or a
+  timeout is a failure — which also handles captive portals, whose cross-origin redirect makes
+  `fetch` reject on CORS.
+- **Hysteresis one way only.** Two consecutive failures declare unreachable (a single dropped
+  request is ordinary, and the verdict *pauses every query in the app*); a single answer from the
+  server declares reachable immediately. That asymmetry is what makes a wrong offline verdict
+  self-correcting, and it matters because `installQueryOnlineManager` hands this verdict to React
+  Query.
+- **The probe is the fallback, not the signal.** `lib/api-client.ts` reports every axios response
+  as reached and every transport-level failure as suspect, and `collab-connection-watch.ts` does
+  the same for the collaboration socket — a completed handshake is proof, a drop is only a hint,
+  and it must persist 3 s to count at all because every page navigation rebuilds the provider. An
+  app in use therefore probes approximately never; the 30 s heartbeat exists solely for an **idle**
+  tab, which makes no HTTP requests at all and would otherwise not notice a dead network until the
+  user's next click. It is skipped while the tab is hidden and while traffic is flowing.
+- **`whenServerReachable()` resolves only on a *definitive* verdict**, and `use-offline-resync.ts`
+  awaits it before deciding whether to trust the cached user. Reading the optimistic boot
+  assumption instead is what left offline editing dead on a cold offline boot: `getMyInfo()` failed,
+  ownership refused to settle, and the gate requires `offlineDataIsOurs`.
+- **Subscribers are notified by comparing against the last *published* verdict**, not by a
+  before/after comparison inside the update. `navigator.onLine === false` is a live veto on every
+  read, so when Wi-Fi really is switched off the verdict changes *before* the `offline` event
+  arrives — a before/after comparison sees `false → false`, concludes nothing changed, and tells
+  nobody. Caught by a test, not by a browser.
+
+Consequences worth knowing: a session whose **server** is down (rather than whose network is) now
+opens the #19 gate too, which is the same situation from the document's point of view and pushes on
+recovery like any other offline edit. A session that can reach the API but not the collaboration
+WebSocket still stays read-only. And an idle tab now sends one ~200-byte unauthenticated,
+unlogged request every 30 s — deliberately unconditional, like phases 1a/1b, because the verdict
+drives the offline pill and React Query's pausing as well as the editing gate.
+
+**The one deployment shape to keep in mind**, stated rather than hidden: a reverse proxy that
+forwards `/api/*` but **black-holes** `/api/health/live` specifically — no response at all, not
+merely a 404 — makes an *idle* tab decide it is offline. React Query then pauses fetches, so the
+recovery signal cannot come from a query. Two things stop that being terminal, and neither is the
+probe: the collaboration socket is not routed through React Query, so opening any page produces a
+handshake that reports reachable and unpauses everything; and the first successful response of any
+kind does the same. It is worth verifying with the `curl` in the repro above rather than relying on
+those, because "idle tab shows the offline pill" is a confusing thing to debug.
+
 ## Vim keybindings (`features/editor/extensions/vim-mode.ts`, PR #26)
 
 Modal editing in the **page editor only**, off by default behind the `vimMode` user preference
@@ -652,6 +735,23 @@ switch on and once off — the switch must make no difference to it):
 6. Open a page never visited before as the **first** page of an offline session: it must stay
    static and read-only.
 7. Switch off ⇒ everything above is inert: static read-only offline, no banners, editable title.
+
+**Reachability repro** (the VPN case; DevTools' Offline toggle **cannot** reproduce it, because it
+also forces `navigator.onLine` to `false` — which is the failure mode's whole disguise):
+
+1. On a machine with a VPN configured, connect the VPN, then switch Wi-Fi **off** at the OS level.
+2. Console: `navigator.onLine` prints `true` — the bug's starting condition. On any build before
+   this fix, everything below fails here.
+3. Within ~10 s the "Offline — showing saved content" pill appears, and a previously-synced page
+   stays editable with the grey "changes are saved locally" banner. Network shows repeated failed
+   `GET /api/health/live` requests, then a widening gap between them.
+4. Switch Wi-Fi back on: within ~5 s a probe succeeds, the pill disappears, and the offline edits
+   are pushed with no page re-open (`[docmost] offline resync: … (online)` in the console).
+5. Server-side sanity check, on the deployment rather than in a browser:
+   `curl -sS -o /dev/null -w '%{http_code}\n' https://<host>/api/health/live` must print `200`.
+   Any status is survivable (any HTTP status counts as reachable); a reverse proxy that
+   **black-holes** that one path is the case to care about — see the note at the end of
+   **Detecting offline**.
 
 ## Deploy (GHCR)
 

@@ -25,8 +25,9 @@
  *
  * ## Why "not connected" rather than "offline"
  *
- * The phase-2 gate asks `navigator.onLine === false`; this asks whether *this
- * document's* provider is connected. They are deliberately different questions.
+ * The phase-2 gate asks whether the server is reachable at all (`reachability.ts`);
+ * this asks whether *this document's* provider is connected. They are
+ * deliberately different questions.
  * The gate is about permitting an edit at all and is kept as narrow as
  * possible; this is about not losing one, and an edit made during a reconnect
  * gap, a captive portal or a dropped WebSocket is just as unpushed as one made

@@ -18,16 +18,17 @@ import { removeOldestQuery } from "@tanstack/react-query-persist-client";
 import type { PersistedClient, Persister } from "@tanstack/react-query-persist-client";
 import type { QueryClient } from "@tanstack/react-query";
 import { QUERY_CACHE_KEY, queryCacheStorage } from "./persisted-store";
-import { seedQueryOnlineState } from "./online-state";
+import { installQueryOnlineManager } from "./online-state";
+import { whenServerReachable } from "./reachability";
 import {
   isSnapshotWorthPersisting,
   shouldDehydrateQuery,
 } from "./persistence-policy";
 
 // Runs on import, i.e. before `main.tsx` renders and therefore before the first
-// query observer mounts — which is the only moment at which this is still
-// useful. See `seedQueryOnlineState` for why it is load-bearing.
-seedQueryOnlineState();
+// query observer mounts — which is the only moment at which the initial value is
+// still useful. See `installQueryOnlineManager` for why it is load-bearing.
+installQueryOnlineManager();
 
 /**
  * How long a dehydrated cache stays usable. Long, because the value of offline
@@ -99,12 +100,24 @@ export const offlinePersistOptions = {
  * re-rendered with `isRestoring: false` and therefore before a single observer
  * has mounted. Invalidating then would match nothing at all. Offline it is
  * skipped outright — the fetches would only park as paused.
+ *
+ * "Offline" is waited for rather than read. At boot the reachability verdict is
+ * an optimistic assumption until the first probe answers (`reachability.ts`), and
+ * `navigator.onLine` — which this used to read — is exactly the thing that lies
+ * about it on a VPN. Invalidating on the assumption is what produced "Error
+ * fetching page data." on top of a good cache, so this waits for the real
+ * verdict; the wait is bounded by the probe's own timeout and, on a working
+ * network, is shorter than the delay it runs alongside.
  */
 const RESTORE_INVALIDATE_DELAY_MS = 500;
 
 export function onQueryCacheRestored(queryClient: QueryClient): void {
-  if (typeof navigator !== "undefined" && navigator.onLine === false) return;
-  setTimeout(() => {
+  void (async () => {
+    const [reachable] = await Promise.all([
+      whenServerReachable(),
+      new Promise((resolve) => setTimeout(resolve, RESTORE_INVALIDATE_DELAY_MS)),
+    ]);
+    if (!reachable) return;
     void queryClient.invalidateQueries({ refetchType: "active" });
-  }, RESTORE_INVALIDATE_DELAY_MS);
+  })();
 }

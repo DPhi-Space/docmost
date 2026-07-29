@@ -61,6 +61,7 @@ import {
   subscribeOwnership,
 } from "./data-ownership";
 import { getOpenPage } from "./open-page-registry";
+import { isServerReachable, subscribeReachability } from "./reachability";
 import { openResyncSession } from "./resync-session";
 import {
   resyncPage,
@@ -117,6 +118,18 @@ export interface ResyncManagerDeps {
   withLock: <T>(name: string, run: () => Promise<T>) => Promise<T | undefined>;
   isEnabled: () => boolean;
   isOnline: () => boolean;
+  /**
+   * Notifies when the answer to `isOnline` changes; returns an unsubscribe.
+   *
+   * This used to be a bare `window.addEventListener("online")` inside the
+   * manager, which is dead code on the failure this whole change is about: where
+   * `navigator.onLine` is stuck at `true` (a VPN interface up after Wi-Fi is
+   * switched off) the property never transitions, so neither event ever fires and
+   * the *reconnect* trigger — the one that matters most, since it is the moment
+   * offline edits can finally be pushed — never fired either. Recovery was left
+   * to the periodic timer, up to ten minutes away.
+   */
+  subscribeOnline: (listener: () => void) => () => void;
   /** The offline data on this disk is provably the signed-in user's. */
   offlineDataIsOurs: () => boolean;
   /** Notifies when the answer above changes; returns an unsubscribe. */
@@ -350,8 +363,15 @@ export function createResyncManager(
     }
   };
 
-  const onOnline = () => void run("online");
-  globalThis.addEventListener?.("online", onOnline);
+  /**
+   * The verdict is only published when it *changes*, so "notified while online"
+   * is the reconnect. Re-read rather than trusted from the notification: the
+   * store's readers consult `navigator.onLine` live, so the answer can be more
+   * pessimistic than the change that woke us.
+   */
+  const unsubscribeOnline = deps.subscribeOnline(() => {
+    if (deps.isOnline()) void run("online");
+  });
 
   /**
    * Ownership is a hard gate, and it is settled asynchronously — the boot pass
@@ -371,7 +391,7 @@ export function createResyncManager(
       stopped = true;
       cancelTimer();
       unsubscribeOwnership();
-      globalThis.removeEventListener?.("online", onOnline);
+      unsubscribeOnline();
     },
   };
 }
@@ -451,7 +471,8 @@ export function createDefaultResyncDeps(): ResyncManagerDeps {
     perPageDeps,
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
-    isOnline: () => globalThis.navigator?.onLine !== false,
+    isOnline: isServerReachable,
+    subscribeOnline: subscribeReachability,
     offlineDataIsOurs,
     subscribeOwnership,
     readOfflineDataOwner,

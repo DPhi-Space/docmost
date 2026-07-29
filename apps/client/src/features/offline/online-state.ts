@@ -1,58 +1,56 @@
 /**
- * Reconciling "is this browser online" between the browser, React Query and the
- * UI. Two consumers, one subject.
+ * Reconciling "can this app reach its server" between the browser, React Query
+ * and the UI. Two consumers, one subject.
  *
- * `navigator.onLine === false` is trustworthy (the OS says there is no route);
- * `true` only means an interface exists, so this is a hint, never a
- * precondition for a request.
+ * The subject itself lives in `reachability.ts` — which is a change of meaning,
+ * not just of module. This used to read `navigator.onLine` on every render, and
+ * `navigator.onLine === true` turned out to be worth nothing: with a VPN
+ * configured, both Chrome and Safari keep reporting `true` after Wi-Fi is
+ * switched off, because the tunnel's virtual interface is still up. Every
+ * consumer below was therefore told the app was online while nothing at all was
+ * reachable — the editing gate stayed shut, React Query ran restored queries
+ * into errors instead of pausing them, and the resync loop never saw the
+ * `online` event that is its reconnect trigger.
+ *
+ * `false` is still believed outright, and is still consulted live; it is only
+ * `true` that now has to be corroborated by something the server said.
  */
 
-import { useSyncExternalStore } from "react";
 import { onlineManager } from "@tanstack/react-query";
-
-function subscribe(onChange: () => void): () => void {
-  window.addEventListener("online", onChange);
-  window.addEventListener("offline", onChange);
-  return () => {
-    window.removeEventListener("online", onChange);
-    window.removeEventListener("offline", onChange);
-  };
-}
-
-function getSnapshot(): boolean {
-  return typeof navigator === "undefined" ? true : navigator.onLine;
-}
-
-/** Server snapshot: assume online so nothing renders an offline state in SSR. */
-function getServerSnapshot(): boolean {
-  return true;
-}
+import {
+  isServerReachable,
+  subscribeReachability,
+  useServerReachable,
+} from "./reachability";
 
 /**
- * `useSyncExternalStore` rather than `useState` + effects: the browser can flip
- * connectivity between render and effect, and the store form makes the
- * subscription the single source of truth instead of a copy that can drift.
+ * Is the server reachable?
+ *
+ * Named for its consumers rather than its mechanism: `title-editor.tsx`,
+ * `offline-indicator.tsx`, `resync-indicator.tsx` and `offline-edit-gate.ts` all
+ * ask "are we online", and all four mean "can we reach the server", which is
+ * what this now answers.
  */
 export function useOnlineStatus(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  return useServerReachable();
 }
 
 /** The slice of React Query's `onlineManager` this module drives. */
 export interface OnlineManagerLike {
-  setOnline(online: boolean): void;
+  setEventListener(
+    setup: (setOnline: (online: boolean) => void) => (() => void) | undefined,
+  ): void;
 }
 
 /**
- * Tell React Query the truth about connectivity **at boot**.
+ * Tell React Query the truth about connectivity — at boot and from then on.
  *
- * `OnlineManager` starts at `online = true` and only ever changes on `online` /
- * `offline` window events — it never reads `navigator.onLine`. A tab loaded
- * while already offline therefore never receives an `offline` event, so React
- * Query believes it is online and, instead of pausing fetches
- * (`networkMode: "online"`), runs every query straight into a network error.
- *
- * That single default is what stands between a persisted cache and a usable
- * offline app. Left alone it does two kinds of damage, both observed in a real
+ * `OnlineManager` starts at `online = true` and, by default, only ever changes
+ * on `online` / `offline` window events. It never reads `navigator.onLine`, so a
+ * tab loaded while already offline never receives an `offline` event and React
+ * Query believes it is online: instead of pausing fetches
+ * (`networkMode: "online"`) it runs every restored query straight into a network
+ * error. Left alone that does two kinds of damage, both observed in a real
  * browser before this existed:
  *
  * 1. every restored query is refetched, fails, and flips to `error`, so the app
@@ -60,15 +58,25 @@ export interface OnlineManagerLike {
  * 2. the now-errored cache is dehydrated over the good one — only successful
  *    queries are persisted — so each offline reload *erases* more of the store.
  *
- * Seeding it once at startup fixes both: fetches park as `paused`, restored data
- * keeps `status: "success"`, and the window `online` event resumes everything.
+ * This replaces the manager's event listener outright rather than seeding a
+ * value once, because the events themselves were the other half of the problem:
+ * where `navigator.onLine` is stuck at `true`, neither event ever fires, so a
+ * seeded value could never be corrected and a reconnect could never be noticed.
+ * Driving it from the reachability store fixes both — the initial value is the
+ * store's, and every subsequent change is a change the store actually observed.
  *
- * Only ever sets `false`. `true` is already the default, and forcing it would
- * risk overwriting a genuine `offline` event that arrived first.
+ * `setEventListener` invokes `setup` immediately, so the seed and the
+ * subscription are one call. React Query re-invokes it whenever it acquires its
+ * first listener again, which is why `setup` must stay re-entrant.
  */
-export function seedQueryOnlineState(
+export function installQueryOnlineManager(
   manager: OnlineManagerLike = onlineManager,
-  nav: { onLine: boolean } | undefined = globalThis.navigator,
 ): void {
-  if (nav?.onLine === false) manager.setOnline(false);
+  manager.setEventListener((setOnline) => {
+    setOnline(isServerReachable());
+    // Both of these delegate to the current monitor on every call rather than
+    // capturing it, so `resetReachabilityForTests` cannot leave React Query
+    // subscribed to a dead one.
+    return subscribeReachability(() => setOnline(isServerReachable()));
+  });
 }

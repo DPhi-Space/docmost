@@ -51,6 +51,11 @@ import {
   reconcileOfflineDataOwnership,
   resetOwnershipForTests,
 } from "./data-ownership";
+import {
+  isServerReachable,
+  resetReachabilityForTests,
+  subscribeReachability,
+} from "./reachability";
 import { createDefaultResyncDeps } from "./resync-manager";
 import { setResyncState } from "./resync-state";
 import {
@@ -80,7 +85,10 @@ describe("createDefaultResyncDeps — the manager's real dependencies", () => {
     setOnline(true);
   });
 
-  afterEach(() => setOnline(true));
+  afterEach(() => {
+    setOnline(true);
+    resetReachabilityForTests();
+  });
 
   it("reads the kill switch, rather than assuming it is on", () => {
     const deps = createDefaultResyncDeps();
@@ -105,13 +113,51 @@ describe("createDefaultResyncDeps — the manager's real dependencies", () => {
     expect(deps.offlineDataIsOurs()).toBe(true);
   });
 
-  it("reads the browser's connectivity, rather than assuming it is online", () => {
+  it("reads the connectivity verdict, rather than assuming it is online", () => {
     const deps = createDefaultResyncDeps();
 
     setOnline(false);
     expect(deps.isOnline()).toBe(false);
     setOnline(true);
     expect(deps.isOnline()).toBe(true);
+  });
+
+  it("reads the verdict from the reachability store, not from `navigator.onLine`", () => {
+    // Wiring this back to `navigator.onLine` would restore the reported bug in
+    // its worst form: with a VPN interface up the property never leaves `true`,
+    // so `isOnline` would answer "online" for a dead network *and* neither
+    // `online` nor `offline` would ever fire, leaving the reconnect trigger dead
+    // too. Offline edits would then wait for the ten-minute periodic timer.
+    const deps = createDefaultResyncDeps();
+
+    expect(deps.isOnline).toBe(isServerReachable);
+    expect(deps.subscribeOnline).toBe(subscribeReachability);
+  });
+
+  it("is notified of connectivity changes the browser never announces", async () => {
+    let reached = false;
+    const monitor = resetReachabilityForTests({
+      browserOnline: () => true,
+      probe: async () => reached,
+      setTimer: () => 0,
+      clearTimer: () => {},
+      subscribeBrowserEvents: () => () => {},
+    });
+    const deps = createDefaultResyncDeps();
+    const seen: boolean[] = [];
+    deps.subscribeOnline(() => seen.push(deps.isOnline()));
+
+    // Two failed probes is the confirmation threshold. No browser event is
+    // involved anywhere in this test, which is the point: on the machines that
+    // reported this, none is ever dispatched.
+    await monitor.check();
+    await monitor.check();
+    expect(seen).toEqual([false]);
+
+    reached = true;
+    await monitor.check();
+
+    expect(seen).toEqual([false, true]);
   });
 
   it("reads the open-page registry the editor writes", () => {

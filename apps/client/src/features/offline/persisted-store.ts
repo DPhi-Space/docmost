@@ -12,6 +12,7 @@
  */
 
 import { clear, createStore, del, get, set } from "idb-keyval";
+import { isServerReachable } from "./reachability";
 
 export const QUERY_CACHE_DB_NAME = "docmost-offline";
 export const QUERY_CACHE_STORE_NAME = "query-cache";
@@ -50,12 +51,18 @@ export function resumePersistingQueryCacheForTests(): void {
  * (`currentUser` and the sidebar tree disappeared after a single offline
  * reload, so the *second* one booted blank).
  *
- * So the store is only ever written from a session that believes it has a
- * network. Skipping the write costs nothing, because there is nothing to save
- * that is not already saved.
+ * So the store is only ever written from a session that can reach the server.
+ * Skipping the write costs nothing, because there is nothing to save that is not
+ * already saved.
+ *
+ * `reachability.ts` rather than `navigator.onLine`: the erosion this guards
+ * against is caused by a session that *cannot reach the server*, and
+ * `navigator.onLine` reports `true` throughout one of the commonest ways of
+ * being in that state (a VPN interface still up after Wi-Fi is switched off), so
+ * the guard did not fire for it.
  */
 function isOffline(): boolean {
-  return typeof navigator !== "undefined" && navigator.onLine === false;
+  return !isServerReachable();
 }
 
 /**
