@@ -29,6 +29,7 @@ import {
   BundleEntryInfo,
   PrecacheManifest,
   buildPrecacheManifest,
+  unmatchedOptionalMarkers,
 } from "./precache-manifest";
 
 const PLUGIN_NAME = "docmost:service-worker";
@@ -107,6 +108,15 @@ export function serviceWorkerPlugin(
       });
 
       manifest = buildPrecacheManifest(entries, listPublicFiles(publicDir));
+
+      const unmatched = unmatchedOptionalMarkers(entries);
+      if (unmatched.length > 0) {
+        this.warn(
+          `${PLUGIN_NAME}: these precache markers matched nothing, so the ` +
+            `corresponding feature will NOT work offline (was a file moved or ` +
+            `a dependency dropped?): ${unmatched.join(", ")}`,
+        );
+      }
     },
 
     async closeBundle() {

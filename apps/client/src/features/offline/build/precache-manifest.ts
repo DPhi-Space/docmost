@@ -52,8 +52,21 @@ export interface PrecacheManifest {
  * `browser-D2tXIcaq.js`) whose names carry no hint of their contents.
  */
 export const OPTIONAL_MODULE_MARKERS = [
+  // The libraries themselves.
   "/node_modules/mermaid/",
   "/node_modules/@terrastruct/d2/",
+  // ...and our own lazy wrappers that import them. These are tiny chunks with
+  // no library module of their own, so nothing else marks them — but without
+  // them the libraries are cached and unreachable: the dynamic import fails
+  // offline with "Failed to fetch dynamically imported module". Observed for
+  // real in an offline browser run; see the Offline/PWA section of AGENTS.md.
+  //
+  // Naming these explicitly beats walking the import graph backwards from the
+  // libraries: mermaid shares vendor chunks with Excalidraw, so a reverse walk
+  // sweeps in unrelated lazy features (measured: 54 entries -> 122, dragging in
+  // Excalidraw and every one of its locale chunks).
+  "/src/features/editor/components/code-block/mermaid-view",
+  "/src/features/editor/components/code-block/d2-view",
 ];
 
 /** Public-dir files worth precaching. Locales are deliberately absent — they
@@ -119,6 +132,22 @@ function staticImportClosure(
   }
 
   return seen;
+}
+
+/**
+ * Markers that matched no module in the bundle.
+ *
+ * The wrapper markers are source paths, so renaming or moving a diagram view
+ * would silently drop it from the manifest and quietly break offline diagram
+ * rendering. The build plugin warns on anything reported here.
+ */
+export function unmatchedOptionalMarkers(entries: BundleEntryInfo[]): string[] {
+  const ids = entries.flatMap((entry) =>
+    (entry.moduleIds ?? []).map(normalizeModuleId),
+  );
+  return OPTIONAL_MODULE_MARKERS.filter(
+    (marker) => !ids.some((id) => id.includes(marker)),
+  );
 }
 
 function cssOf(

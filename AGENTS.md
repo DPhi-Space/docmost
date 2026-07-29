@@ -94,10 +94,23 @@ only be identified reliably from the **module graph**; and it costs +55 packages
 lines in a repo where the lockfile is load-bearing. The replacement adds **zero dependencies**.
 
 - `build/precache-manifest.ts` — pure classification of the finished bundle into `core`
-  (required, fetched during `install`; ~4.6 MB: entry + its static import closure + their CSS +
-  woff2 fonts + icons + `manifest.json`) and `optional` (best effort, warmed after `activate`;
-  ~10.5 MB: mermaid + D2, matched by **module id**, not by file name). Splitting the two is the
-  whole point: a flaky network must not be able to prevent activation.
+  (required, fetched during `install`; measured 34 entries / 4.60 MB: entry + its static import
+  closure + their CSS + woff2 fonts + icons + `manifest.json`) and `optional` (best effort,
+  warmed after activation; measured 56 entries / 10.49 MB: mermaid + D2). Splitting the two is
+  the whole point: a flaky network must not be able to prevent activation. Verified in a browser
+  — the worker activates with 34 entries cached, then warms to 90.
+
+  Selection is by **module id**, never by file name, because rolldown emits opaque hashed chunks
+  (`chunk-Z5NKEFVG-*.js`, `browser-D2tXIcaq.js`). `OPTIONAL_MODULE_MARKERS` names the two
+  libraries **and our own lazy wrapper chunks** (`code-block/mermaid-view`, `code-block/d2-view`).
+  The wrappers are not optional trivia: they are what the app actually imports, they contain no
+  library module of their own, and caching the library without them fails offline with
+  `Failed to fetch dynamically imported module` — observed in a real offline browser run before
+  the markers were added. Do **not** replace this with a reverse walk of the import graph;
+  mermaid shares vendor chunks with Excalidraw, so walking backwards sweeps in unrelated lazy
+  features (measured: 56 entries → 122, dragging in Excalidraw and all of its locale chunks).
+  Because the wrapper markers are source paths, moving a diagram view would silently drop it —
+  `unmatchedOptionalMarkers()` makes the build **warn** when a marker matches nothing.
 - `build/service-worker-plugin.ts` — the Vite plugin. Classifies in `generateBundle`, then in
   `closeBundle` runs a second isolated Vite build that compiles `sw/sw.ts` into a classic IIFE.
 - `sw/routes.ts`, `sw/cache-policy.ts` — pure decision logic, unit tested (a service worker
@@ -197,14 +210,26 @@ grep -c '\.html' apps/client/dist/sw.js                     # must print 0
 
 Then, in a browser against the running container:
 1. Load the app, DevTools → Application → Service Workers: `sw.js` is activated and running.
-2. Open a page containing a mermaid block and one containing a D2 block.
-3. DevTools → Network → Offline, reload: the shell boots (no blank page, no chunk-load errors)
-   and both diagram previews still render.
-4. DevTools → Network → Online: the `/collab` and `/socket.io` WebSockets reconnect normally
+   Cache Storage shows `docmost-offline-precache-<version>-<hash>` at 34 entries immediately,
+   growing to 90 as the best-effort warm-up finishes. No `.html` entry may ever appear.
+2. `curl -I http://localhost:3000/sw.js` → `content-type: application/javascript` (**not**
+   `text/html`) and `cache-control: public, max-age=0` + `ETag`. A `text/html` here means
+   `sw.js` was missing from `client/dist` when the server booted.
+3. Open a page containing a mermaid block and one containing a D2 block.
+4. DevTools → Network → Offline, reload: the shell boots from cache with `window.CONFIG` intact
+   and no chunk-load errors. **Until #18 lands the app still renders blank** — REST data is not
+   persisted yet, and `UserProvider` blanks the app while `/users/me` fails. Check the shell, not
+   the content: navigation returns 200 and no `Failed to fetch dynamically imported module`.
+5. DevTools → Network → Online: the `/collab` and `/socket.io` WebSockets reconnect normally
    (the worker must never appear in their request chain).
-5. Deploy a newer build, then reload an old tab: the "A new version is available" prompt
+6. Deploy a newer build, then reload an old tab: the "A new version is available" prompt
    appears, "Reload" activates the waiting worker, and `docmost-offline-precache-*` caches from
    the previous build are gone afterwards. The tab must **not** reload on its own.
+
+The offline diagram criterion cannot be checked by hand until #18 lands. It is covered instead by
+`scratchpad` Playwright drivers that keep the browser genuinely offline for every asset while
+replaying only the API responses #18 will persist; that run showed both previews rendering with
+zero bytes fetched from the network. Re-do that if you change the precache classification.
 
 ## Deploy (GHCR)
 

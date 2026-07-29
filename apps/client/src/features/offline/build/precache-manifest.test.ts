@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   BundleEntryInfo,
+  OPTIONAL_MODULE_MARKERS,
   buildPrecacheManifest,
   isPrecachableFile,
   isPublicPrecachableFile,
+  unmatchedOptionalMarkers,
 } from "./precache-manifest";
 
 const chunk = (
@@ -32,6 +34,16 @@ const realisticBundle: BundleEntryInfo[] = [
     importedCss: ["assets/index-V9vAIF2h.css"],
   }),
   chunk("assets/rolldown-runtime-aKtaBQYM.js"),
+  // The app's own lazy wrappers. They contain no node_modules/mermaid or
+  // @terrastruct/d2 module of their own, so nothing marks them directly — but
+  // without them the library chunks below are unreachable offline.
+  chunk("assets/mermaid-view-D4yDZMas.js", {
+    imports: ["assets/chunk-Z5NKEFVG-CaRJOzfK.js"],
+    moduleIds: ["/repo/apps/client/src/features/editor/components/code-block/mermaid-view.tsx"],
+  }),
+  chunk("assets/d2-view-B5KpaUio.js", {
+    moduleIds: ["/repo/apps/client/src/features/editor/components/code-block/d2-view.tsx"],
+  }),
   chunk("assets/vendor-mantine-Cxq.js", {
     moduleIds: ["/repo/node_modules/@mantine/core/index.js"],
     importedCss: ["assets/vendor-mantine-CCV.css"],
@@ -130,6 +142,23 @@ describe("buildPrecacheManifest", () => {
     expect(manifest.optional).toContain("/assets/mermaid-shared-AAA.js");
   });
 
+  it("precaches the lazy wrappers that reach the heavy chunks", () => {
+    // Regression: caching mermaid.core but not the mermaid-view chunk that
+    // imports it makes the library unreachable — the dynamic import fails
+    // offline with "Failed to fetch dynamically imported module". Observed in
+    // a real offline browser run before this rule existed.
+    expect(manifest.optional).toContain("/assets/mermaid-view-D4yDZMas.js");
+    expect(manifest.optional).toContain("/assets/d2-view-B5KpaUio.js");
+  });
+
+  it("does not drag unrelated lazy features in with the diagram renderers", () => {
+    // Excalidraw shares vendor chunks with mermaid. It must stay out of the
+    // manifest and be left to the runtime CacheFirst route.
+    expect(manifest.optional).not.toContain("/assets/excalidraw-utils-B4z5z.js");
+    expect(manifest.optional).not.toContain("/assets/excalidraw-utils-HOYK6HrD.css");
+    expect(manifest.optional).not.toContain("/assets/index-CmTnhK4F.js");
+  });
+
   it("leaves other lazy chunks to the runtime cache", () => {
     const all = [...manifest.core, ...manifest.optional];
     expect(all).not.toContain("/assets/excalidraw-utils-B4z5z.js");
@@ -180,5 +209,28 @@ describe("buildPrecacheManifest", () => {
 
   it("tolerates an empty bundle", () => {
     expect(buildPrecacheManifest([], [])).toEqual({ core: [], optional: [] });
+  });
+});
+
+describe("unmatchedOptionalMarkers", () => {
+  it("reports nothing when every marker is present in the bundle", () => {
+    expect(unmatchedOptionalMarkers(realisticBundle)).toEqual([]);
+  });
+
+  it("reports a wrapper whose source file was moved or renamed", () => {
+    // The wrapper markers are source paths. If a diagram view is relocated the
+    // manifest would silently lose it, so the build plugin warns on this.
+    const renamed = realisticBundle.map((e) =>
+      e.fileName === "assets/mermaid-view-D4yDZMas.js"
+        ? { ...e, moduleIds: ["/repo/apps/client/src/features/editor/components/diagrams/mermaid.tsx"] }
+        : e,
+    );
+    expect(unmatchedOptionalMarkers(renamed)).toEqual([
+      "/src/features/editor/components/code-block/mermaid-view",
+    ]);
+  });
+
+  it("reports every marker for an empty bundle", () => {
+    expect(unmatchedOptionalMarkers([])).toEqual(OPTIONAL_MODULE_MARKERS);
   });
 });
