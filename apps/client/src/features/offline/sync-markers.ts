@@ -20,7 +20,15 @@
  * the next user of the browser open a live editor on it.
  */
 
-import { clear, createStore, get, set, type UseStore } from "idb-keyval";
+import {
+  clear,
+  createStore,
+  del,
+  get,
+  keys,
+  set,
+  type UseStore,
+} from "idb-keyval";
 
 export const SYNC_MARKER_DB_NAME = "docmost-offline-sync";
 export const SYNC_MARKER_STORE_NAME = "page-sync-markers";
@@ -33,6 +41,8 @@ export interface SyncMarkerBackend {
   get(key: string): Promise<number | undefined>;
   set(key: string, value: number): Promise<void>;
   clear(): Promise<void>;
+  keys(): Promise<string[]>;
+  del(key: string): Promise<void>;
 }
 
 /**
@@ -52,6 +62,8 @@ function defaultBackend(): SyncMarkerBackend {
     get: (key) => get<number>(key, s),
     set: (key, value) => set(key, value, s),
     clear: () => clear(s),
+    keys: () => keys<string>(s),
+    del: (key) => del(key, s),
   };
 }
 
@@ -107,5 +119,34 @@ export async function clearPageSyncMarkers(
     await (backend ?? defaultBackend()).clear();
   } catch {
     // Best effort; logout is followed by a full-page navigation.
+  }
+}
+
+/**
+ * Drop every marker **except** the named pages'.
+ *
+ * Used only by the session-expiry path (`session-expiry.ts`), which keeps the
+ * y-indexeddb documents of pages holding unpushed edits. A marker whose
+ * document has just been deleted would be a lie of exactly the kind
+ * `offline-edit-gate.ts` now guards against, so the two sets are kept in step
+ * here rather than left to agree by accident.
+ *
+ * Falls back to clearing everything on any failure. That fails *closed* — no
+ * marker means no offline editing, which costs a user one trip online and
+ * cannot mislead anyone.
+ */
+export async function clearPageSyncMarkersExcept(
+  keep: readonly string[],
+  backend?: SyncMarkerBackend,
+): Promise<void> {
+  const store = backend ?? defaultBackend();
+  try {
+    const kept = new Set(keep);
+    const all = await store.keys();
+    await Promise.all(
+      all.filter((key) => !kept.has(key)).map((key) => store.del(key)),
+    );
+  } catch {
+    await clearPageSyncMarkers(backend);
   }
 }

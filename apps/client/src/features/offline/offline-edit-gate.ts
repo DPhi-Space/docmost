@@ -49,6 +49,8 @@ import { useOnlineStatus } from "./online-state";
 import { useOfflineEditingEnabled } from "./offline-editing-settings";
 import { hasPageRemoteSynced, markPageRemoteSynced } from "./sync-markers";
 import { clearDirtyPage, recordDirtyPage } from "./dirty-pages";
+import { hasDocContent, type ContentBearingDoc } from "./doc-content";
+import { useOfflineDataIsOurs } from "./data-ownership";
 import { resolveDirtyPageLink } from "./dirty-page-link";
 import { trackDirtyEdits, type DocUpdateSource } from "./dirty-tracking";
 import { claimOpenPage, releaseOpenPage } from "./open-page-registry";
@@ -71,6 +73,29 @@ export interface OfflineEditGateInput {
   featureEnabled: boolean;
   isLocalSynced: boolean;
   hasSyncedBefore: boolean;
+  /**
+   * The document the editor would bind to actually holds something
+   * (`doc-content.ts`).
+   *
+   * `isLocalSynced` alone is not this. y-indexeddb reports "synced" for an
+   * empty database exactly as it does for a populated one, and the marker that
+   * satisfies `hasSyncedBefore` lives in a *different* IndexedDB database, so
+   * the two can disagree — delete just `page.<pageId>` and the marker survives.
+   * Without this term the gate opened a live, editable, **blank** editor
+   * claiming the user's changes were saved locally.
+   */
+  hasLocalContent: boolean;
+  /**
+   * The offline data on this disk is provably the signed-in user's
+   * (`data-ownership.ts`).
+   *
+   * Defaults to false and stays false until reconciliation proves otherwise, so
+   * a browser holding a previous user's preserved documents cannot open one in
+   * a live editor while the cleanup is still deciding. A cleanup hook that
+   * *must* run is exactly what failed three ways in the audit; this term is the
+   * reader refusing on its own account.
+   */
+  offlineDataIsOurs: boolean;
   isOnline: boolean;
 }
 
@@ -83,6 +108,8 @@ export function canEditWithoutConnection(input: OfflineEditGateInput): boolean {
     input.featureEnabled &&
     input.isLocalSynced &&
     input.hasSyncedBefore &&
+    input.hasLocalContent &&
+    input.offlineDataIsOurs &&
     !input.isOnline
   );
 }
@@ -97,18 +124,30 @@ export interface RemoteSyncSource {
   readonly synced: boolean;
   readonly unsyncedChanges: number;
   /**
-   * The Yjs document, for dirty tracking. Optional so the existing tests — and
-   * any future provider — can supply only what they are asked about.
+   * The Yjs document — read for dirty tracking and for the emptiness check.
+   * Optional so a test can supply only what it is asking about; a bundle
+   * without it can never open the gate, since `hasDocContent(undefined)` is
+   * false.
    */
-  readonly document?: DocUpdateSource;
+  readonly document?: DocUpdateSource & ContentBearingDoc;
 }
 
 /**
- * The bundle `page-editor.tsx` keeps in `providersRef`. Only `remote` is read
- * for its state; `local` is needed purely as an update *origin* to exclude
- * (the y-indexeddb replay), never called.
+ * The bundle `page-editor.tsx` keeps in `providersRef`.
+ *
+ * `pageId` is the important field. Everything this hook does — writing a sync
+ * marker, recording a dirty page, clearing one — is a statement *about a
+ * specific page*, made from a provider read out of a mutable ref. Carrying the
+ * provenance in the bundle turns "is this the right provider?" from an
+ * assumption about React's scheduling into a comparison this file can make and
+ * a test can break.
+ *
+ * `local` is needed purely as an update *origin* to exclude (the y-indexeddb
+ * replay); it is never called.
  */
 export interface PageProviders {
+  /** The page these providers were constructed for (`page-editor.tsx:140`). */
+  pageId?: string;
   remote: RemoteSyncSource;
   local?: unknown;
 }
@@ -118,14 +157,21 @@ export interface UseOfflineEditGateInput {
   /**
    * `page-editor.tsx`'s `providersRef` itself, not `providersRef.current`.
    *
-   * The ref is the only always-current handle on the provider. `PageEditor` is
-   * *not* remounted when the route changes — React reconciles the same element
-   * and only the `pageId` prop changes — and the provider effect that swaps the
-   * providers does not necessarily trigger a further render, so a value read
-   * during render can refer to a provider that has since been destroyed. That
-   * matters here more than anywhere else: a destroyed *previous* page's
-   * provider still reports `synced === true`, which would write a sync marker
-   * for a page the server never acknowledged.
+   * The ref is the only always-current handle on the provider: the effect that
+   * builds the providers runs *after* the render that calls this hook, so a
+   * value captured during render is null on the first pass and can be stale
+   * afterwards. Reading through the ref inside the timer is what makes it
+   * current.
+   *
+   * A previous, *destroyed* provider still reports `synced === true`, so acting
+   * on the wrong one would write a sync marker for a page the server never
+   * acknowledged. Earlier revisions of this comment justified the ref by
+   * asserting that `PageEditor` is not remounted across navigation. **That is
+   * false** — `pages/page/page.tsx:169` puts `key={page.id}` on the memoized
+   * editor, so it is remounted per page — and the code was in fact safe only
+   * because of React's declaration-order effect execution across two files.
+   * That is not an invariant worth depending on, so the bundle now carries its
+   * own `pageId` and everything below refuses to act unless it matches.
    */
   providers: { current: PageProviders | null } | null;
   /** y-indexeddb finished loading. */
@@ -147,6 +193,7 @@ export function useOfflineEditGate({
 }: UseOfflineEditGateInput): OfflineEditGate {
   const featureEnabled = useOfflineEditingEnabled();
   const isOnline = useOnlineStatus();
+  const offlineDataIsOurs = useOfflineDataIsOurs();
 
   /**
    * Held as "which page is known synced" rather than as a boolean, for the same
@@ -156,6 +203,12 @@ export function useOfflineEditGate({
    */
   const [syncedPageId, setSyncedPageId] = useState<string | null>(null);
   const hasSyncedBefore = syncedPageId === pageId;
+  /**
+   * Which page the timer last saw a **populated** document for. Same
+   * page-scoped shape, same reason: a boolean would let one page's content
+   * vouch for the next page's empty shell.
+   */
+  const [populatedPageId, setPopulatedPageId] = useState<string | null>(null);
   const isConnected = connectionStatus === WebSocketStatus.Connected;
 
   // Read the marker for this page. Skipped entirely while the switch is off, so
@@ -175,6 +228,8 @@ export function useOfflineEditGate({
     featureEnabled,
     isLocalSynced,
     hasSyncedBefore,
+    hasLocalContent: populatedPageId === pageId,
+    offlineDataIsOurs,
     isOnline,
   });
 
@@ -250,11 +305,21 @@ export function useOfflineEditGate({
       const provider = bundle?.remote;
       if (!provider) return;
 
-      // Attached from the tick rather than from an effect for the same reason
-      // the provider is *read* from the tick: on the first render
-      // `providersRef.current` is still null, and `PageEditor` is not
-      // remounted across navigation, so there is no render that reliably
-      // coincides with a live provider for this page.
+      /**
+       * Provenance, checked rather than assumed.
+       *
+       * Every write below names `pageId`, but the *evidence* for it comes from
+       * whatever the ref happens to hold. If the two disagree — a bundle not
+       * yet swapped, or one already replaced — the honest answer is to do
+       * nothing this tick and try again in a second. `pageId` is undefined only
+       * for a caller that predates this field, and such a caller has no
+       * provenance to offer, so it is refused too.
+       */
+      if (bundle.pageId !== pageId) return;
+
+      // Attached from the tick rather than from an effect because the effect
+      // that creates the providers runs after this hook's, so there is no
+      // render that reliably coincides with a live provider for this page.
       if (trackingRef.current?.pageId !== pageId && provider.document) {
         trackingRef.current?.stop();
         trackingRef.current = {
@@ -272,6 +337,13 @@ export function useOfflineEditGate({
             },
           }),
         };
+      }
+
+      // Sampled here, next to the provenance check, because this is the only
+      // place the *actual document the editor would bind to* is in hand. A
+      // marker on its own cannot answer it: it lives in another database.
+      if (isLocalSynced && hasDocContent(provider.document)) {
+        setPopulatedPageId(pageId);
       }
 
       const hasLiveSync = isConnected && provider.synced;
@@ -294,6 +366,7 @@ export function useOfflineEditGate({
           void markPageRemoteSynced(pageId);
         }
       }
+      const wasWarned = stateRef.current.warned;
       stateRef.current = nextUnsyncedState(
         stateRef.current,
         {
@@ -304,12 +377,41 @@ export function useOfflineEditGate({
         UNSYNCED_GRACE_MS,
       );
       setUnsyncedChangesWarning(stateRef.current.warned);
+
+      /**
+       * Register the page the moment the server is shown to be refusing its
+       * writes.
+       *
+       * `dirty-tracking.ts` only records edits made while the provider is
+       * *disconnected*, but this is the other shape of unpushed work: a live,
+       * synced connection the server answers with `SyncStatus(false)`. Those
+       * edits were never in the registry, so a later session expiry would not
+       * know to preserve them — and would delete exactly the edits the banner
+       * above them promises are safe on this device.
+       */
+      if (!wasWarned && stateRef.current.warned) {
+        maybeDirtyRef.current = true;
+        void recordDirtyPage(pageId, resolveDirtyPageLink(pageId)).then(
+          (recorded) => {
+            if (!recorded) {
+              // Not swallowed: the user is being told their edits are safe
+              // here, and this is the one place that can know the index of
+              // them was not written.
+              console.warn(
+                `[docmost] offline: could not register unsaved changes for page ${pageId}`,
+              );
+            }
+          },
+        );
+      }
     };
 
     tick();
     const interval = setInterval(tick, UNSYNCED_POLL_MS);
     return () => clearInterval(interval);
-  }, [pageId, featureEnabled, providers, isConnected]);
+    // `isLocalSynced` is a dependency so the content check runs the instant
+    // y-indexeddb finishes, rather than up to a second later.
+  }, [pageId, featureEnabled, providers, isConnected, isLocalSynced]);
 
   useEffect(
     () => () => {

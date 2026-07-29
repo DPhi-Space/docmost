@@ -50,12 +50,23 @@ import {
   clearDirtyPage,
   listDirtyPages,
   markDirtyPageBlocked,
+  readOfflineDataOwner,
   selectPagesToResync,
+  type OfflineDataOwner,
 } from "./dirty-pages";
 import { isOfflineEditingEnabled } from "./offline-editing-settings";
+import {
+  getSettledUserId,
+  offlineDataIsOurs,
+  subscribeOwnership,
+} from "./data-ownership";
 import { getOpenPage } from "./open-page-registry";
 import { openResyncSession } from "./resync-session";
-import { resyncPage, type PageResyncOutcome } from "./resync-page";
+import {
+  resyncPage,
+  type PageResyncOutcome,
+  type ResyncPageDeps,
+} from "./resync-page";
 import { setResyncState } from "./resync-state";
 
 /** The Web Locks name; shared by every tab of this origin. */
@@ -106,12 +117,27 @@ export interface ResyncManagerDeps {
   withLock: <T>(name: string, run: () => Promise<T>) => Promise<T | undefined>;
   isEnabled: () => boolean;
   isOnline: () => boolean;
+  /** The offline data on this disk is provably the signed-in user's. */
+  offlineDataIsOurs: () => boolean;
+  /** Notifies when the answer above changes; returns an unsubscribe. */
+  subscribeOwnership: (listener: () => void) => () => void;
+  /** The owner stamp, read from the same store as the work it describes. */
+  readOfflineDataOwner: () => Promise<OfflineDataOwner>;
+  /** The identity the current ownership verdict was reached for. */
+  currentUserId: () => string | null;
   now: () => number;
   publish: typeof setResyncState;
   /** Injected so a test can drive the schedule without real timers. */
   setTimer: (fn: () => void, ms: number) => number;
   clearTimer: (handle: number) => void;
   log: (message: string, detail?: unknown) => void;
+  /**
+   * The per-page dependency bundle `resyncOnePage` is built from. Present only
+   * on the production wiring (`createDefaultResyncDeps`), where it exists so a
+   * test can inspect the parts — `shouldAbort` above all — that are otherwise
+   * sealed inside a closure.
+   */
+  perPageDeps?: () => ResyncPageDeps;
 }
 
 /**
@@ -133,9 +159,32 @@ export async function runResyncPass(
     skipped: false,
   };
 
+  // Ownership before anything else. Pushing a document this browser cannot
+  // prove belongs to the signed-in user would put the previous user's words on
+  // the server under the current user's identity — the worst half of the leak
+  // this guards. `false` until reconciliation says otherwise.
+  if (!deps.offlineDataIsOurs()) return empty;
   if (!deps.isEnabled() || !deps.isOnline()) return empty;
 
   const result = await deps.withLock(RESYNC_LOCK_NAME, async () => {
+    /**
+     * Ownership again, this time read from the **same store as the records**.
+     *
+     * `offlineDataIsOurs()` above is a cached verdict, and a cached verdict can
+     * be out of step with the disk: a browser run caught a pass pushing the
+     * previous user's document because the flag had been opened while the erase
+     * that followed it was still in flight. The stamp lives beside the records
+     * in one IndexedDB store, so it cannot disagree with them.
+     */
+    const owner = await deps.readOfflineDataOwner();
+    if (
+      owner.status === "unreadable" ||
+      (owner.status === "known" && owner.ownerUserId !== deps.currentUserId())
+    ) {
+      deps.log("offline resync: registry is not this user's, standing down");
+      return empty;
+    }
+
     const records = await deps.listDirtyPages();
     const pages = selectPagesToResync(records, {
       openPageId: deps.getOpenPage(),
@@ -185,6 +234,10 @@ export async function runResyncPass(
         default:
           // `retry` and `aborted` both leave the entry exactly as it was.
           summary.deferred += 1;
+          deps.log(
+            `offline resync: ${page.pageId} deferred`,
+            outcome.status === "retry" ? outcome.reason : outcome.status,
+          );
           break;
       }
       deps.publish({ completed: summary.synced + summary.blocked + summary.deferred });
@@ -235,7 +288,7 @@ export interface ResyncManager {
 export function createResyncManager(
   overrides: Partial<ResyncManagerDeps> = {},
 ): ResyncManager {
-  const deps: ResyncManagerDeps = { ...defaultDeps(), ...overrides };
+  const deps: ResyncManagerDeps = { ...createDefaultResyncDeps(), ...overrides };
 
   let stopped = false;
   let running = false;
@@ -300,6 +353,16 @@ export function createResyncManager(
   const onOnline = () => void run("online");
   globalThis.addEventListener?.("online", onOnline);
 
+  /**
+   * Ownership is a hard gate, and it is settled asynchronously — the boot pass
+   * below almost always runs before the answer is known and returns empty. Run
+   * again the moment it becomes known, or the next attempt is a whole idle
+   * interval away.
+   */
+  const unsubscribeOwnership = deps.subscribeOwnership(() => {
+    if (deps.offlineDataIsOurs()) void run("manual");
+  });
+
   void run("boot");
 
   return {
@@ -307,6 +370,7 @@ export function createResyncManager(
     stop: () => {
       stopped = true;
       cancelTimer();
+      unsubscribeOwnership();
       globalThis.removeEventListener?.("online", onOnline);
     },
   };
@@ -343,7 +407,7 @@ async function fetchCollabToken(): Promise<string | undefined> {
  * decline, and is reported as `undefined` so the caller can tell it apart from
  * a pass that ran and found nothing.
  */
-async function withWebLock<T>(
+export async function withWebLock<T>(
   name: string,
   run: () => Promise<T>,
 ): Promise<T | undefined> {
@@ -354,24 +418,44 @@ async function withWebLock<T>(
   ) as Promise<T | undefined>;
 }
 
-function defaultDeps(): ResyncManagerDeps {
+/**
+ * The production wiring, exported so it can be *tested* rather than merely
+ * written.
+ *
+ * Every test in this file that supplies its own dependencies proves something
+ * about the loop and nothing about how the loop is connected to the app. That
+ * gap is real: replacing `isEnabled` with `() => true` here would bypass the
+ * kill switch, and replacing either open-page hook with `() => null` would let
+ * the manager open a second provider on the page the user is reading — and a
+ * suite that never touches this function stays green through both.
+ */
+export function createDefaultResyncDeps(): ResyncManagerDeps {
+  const perPageDeps = (): ResyncPageDeps => ({
+    openSession: openResyncSession,
+    getToken: fetchCollabToken,
+    isTokenExpired: (token) => isCollabTokenExpired(token),
+    // Re-read on every poll, not captured: the user can navigate into a page
+    // while it is being pushed.
+    shouldAbort: (id) => getOpenPage() === id,
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: () => Date.now(),
+  });
+
   return {
     listDirtyPages,
     clearDirtyPage,
     markDirtyPageBlocked,
     getOpenPage,
-    resyncOnePage: (pageId) =>
-      resyncPage(pageId, {
-        openSession: openResyncSession,
-        getToken: fetchCollabToken,
-        isTokenExpired: (token) => isCollabTokenExpired(token),
-        shouldAbort: (id) => getOpenPage() === id,
-        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        now: () => Date.now(),
-      }),
+    resyncOnePage: (pageId) => resyncPage(pageId, perPageDeps()),
+    /** Exposed for the wiring test; not part of `ResyncManagerDeps`. */
+    perPageDeps,
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
     isOnline: () => globalThis.navigator?.onLine !== false,
+    offlineDataIsOurs,
+    subscribeOwnership,
+    readOfflineDataOwner,
+    currentUserId: getSettledUserId,
     now: () => Date.now(),
     publish: setResyncState,
     setTimer: (fn, ms) => globalThis.setTimeout(fn, ms) as unknown as number,

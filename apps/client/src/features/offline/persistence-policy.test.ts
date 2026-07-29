@@ -9,15 +9,51 @@ import {
 
 const success = { status: "success" };
 
+/**
+ * The allowlist, written out rather than read from the module.
+ *
+ * `it.each(PERSISTED_QUERY_KEY_ROOTS)` used to generate a case per entry, which
+ * asked an implementation that *is* `new Set(PERSISTED_QUERY_KEY_ROOTS)`
+ * whether its own list contains its own list. Thirty-two green tests that no
+ * change to the policy could ever turn red. Stating the roots here means adding
+ * one — the actual risk, since every added root writes more user data to disk —
+ * has to be a deliberate edit in two places.
+ */
+const EXPECTED_PERSISTED_ROOTS = [
+  "currentUser",
+  "workspace",
+  "entitlements",
+  "spaces",
+  "space",
+  "root-sidebar-pages",
+  "sidebar-pages",
+  "pages",
+  "breadcrumbs",
+  "favorites",
+  "favorite-ids",
+  "recent-changes",
+  "comments",
+];
+
+describe("the persistence allowlist", () => {
+  it("is exactly the thirteen reviewed roots", () => {
+    expect([...PERSISTED_QUERY_KEY_ROOTS]).toEqual(EXPECTED_PERSISTED_ROOTS);
+  });
+
+  it("persists every root on it and nothing else", () => {
+    const persisted = EXPECTED_PERSISTED_ROOTS.filter((root) =>
+      isPersistableQueryKey([root]),
+    );
+    const leaked = NEVER_PERSISTED_QUERY_KEY_ROOTS.filter((root) =>
+      isPersistableQueryKey([root]),
+    );
+
+    expect(persisted).toEqual(EXPECTED_PERSISTED_ROOTS);
+    expect(leaked).toEqual([]);
+  });
+});
+
 describe("isPersistableQueryKey", () => {
-  it.each(PERSISTED_QUERY_KEY_ROOTS)("persists %s", (root) => {
-    expect(isPersistableQueryKey([root])).toBe(true);
-  });
-
-  it.each(NEVER_PERSISTED_QUERY_KEY_ROOTS)("never persists %s", (root) => {
-    expect(isPersistableQueryKey([root])).toBe(false);
-  });
-
   it("has no overlap between the allow and deny lists", () => {
     const allowed = new Set<string>(PERSISTED_QUERY_KEY_ROOTS);
     const overlap = NEVER_PERSISTED_QUERY_KEY_ROOTS.filter((root) =>

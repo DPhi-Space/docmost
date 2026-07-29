@@ -8,11 +8,30 @@
  * write surface (`settings.ai.mcp` turns the endpoint on, `settings.ai.mcpWrite`
  * turns writes on — see AGENTS.md).
  *
- * With the switch off, every side effect this phase introduces is skipped: no
- * sync markers are written, no IndexedDB database is created, no editor gate is
- * widened, no banner renders, and the title editor behaves exactly as it does on
- * the base release. "Off" means "byte-identical to upstream", and that is what
- * makes the phase safe to merge.
+ * With the switch off, every side effect **phases 2 and 3** introduce is
+ * skipped: no sync markers or dirty-page records are written, neither of their
+ * IndexedDB databases is created, no editor gate is widened, no banner renders,
+ * no background sync loop or `online` listener exists, and the title editor
+ * behaves exactly as it does on the base release.
+ *
+ * **One exception, deliberate.** The cross-account ownership check
+ * (`data-ownership.ts`) runs whether the switch is on or off, because it is a
+ * privacy control and not a feature — an audit found that gating it here meant
+ * a user who simply declined offline editing thereby declined the cleanup that
+ * keeps the previous user's documents out of their session. It reads one key
+ * from the dirty-page store, which creates that (empty) IndexedDB database on
+ * every authenticated boot. No record is ever written with the switch off.
+ *
+ * **The rest of the claim is about the editor, not about the app.** Phases 1a and 1b are
+ * unconditional by design and this switch does not reach them: the service
+ * worker still registers and precaches, `docmost-offline` still holds the
+ * dehydrated query cache, the update check still runs every thirty minutes, and
+ * the "Offline — showing saved content" pill still appears. Earlier wording
+ * here said "byte-identical to upstream" without that qualification, which was
+ * true of the collaboration-adjacent surface and overstated everywhere else.
+ * What the switch guarantees is that the **editor** takes the same code path
+ * with it off as on the base release — which is the property that makes the one
+ * patch to `page-editor.tsx` safe to merge.
  *
  * **localStorage, not the server.** Two reasons, both hard: the fork makes zero
  * `apps/server/` changes in this phase, and a setting that gates *offline*

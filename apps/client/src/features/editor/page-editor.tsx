@@ -132,6 +132,7 @@ export default function PageEditor({
     local: IndexeddbPersistence;
     remote: HocuspocusProvider;
     socket: HocuspocusProviderWebsocket;
+    pageId: string;
   } | null>(null);
   const [providersReady, setProvidersReady] = useState(false);
 
@@ -197,7 +198,7 @@ export default function PageEditor({
       });
 
       local.on("synced", onLocalSyncedHandler);
-      providersRef.current = { socket, local, remote };
+      providersRef.current = { socket, local, remote, pageId };
       setProvidersReady(true);
     } else {
       setProvidersReady(true);

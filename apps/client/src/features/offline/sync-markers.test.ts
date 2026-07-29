@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   clearPageSyncMarkers,
+  clearPageSyncMarkersExcept,
   hasPageRemoteSynced,
   markPageRemoteSynced,
   type SyncMarkerBackend,
@@ -17,6 +18,10 @@ function memoryBackend(seed: Record<string, number> = {}) {
     clear: async () => {
       map.clear();
     },
+    keys: async () => [...map.keys()],
+    del: async (key) => {
+      map.delete(key);
+    },
   };
   return { backend, map };
 }
@@ -30,6 +35,12 @@ function throwingBackend(): SyncMarkerBackend {
       throw new Error("quota exceeded");
     },
     clear: async () => {
+      throw new Error("blocked");
+    },
+    keys: async () => {
+      throw new Error("blocked");
+    },
+    del: async () => {
       throw new Error("blocked");
     },
   };
@@ -104,6 +115,52 @@ describe("clearPageSyncMarkers", () => {
   it("never rejects, so it cannot hold up a logout redirect", async () => {
     await expect(
       clearPageSyncMarkers(throwingBackend()),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("clearPageSyncMarkersExcept", () => {
+  it("keeps exactly the named pages and drops the rest", async () => {
+    const { backend, map } = memoryBackend({ keep: 1, drop: 2, alsoDrop: 3 });
+
+    await clearPageSyncMarkersExcept(["keep"], backend);
+
+    expect([...map.keys()]).toEqual(["keep"]);
+  });
+
+  it("keeps nothing when the list is empty", async () => {
+    const { backend, map } = memoryBackend({ a: 1, b: 2 });
+
+    await clearPageSyncMarkersExcept([], backend);
+
+    expect(map.size).toBe(0);
+  });
+
+  it("ignores names that have no marker", async () => {
+    const { backend, map } = memoryBackend({ a: 1 });
+
+    await clearPageSyncMarkersExcept(["a", "never-seen"], backend);
+
+    expect([...map.keys()]).toEqual(["a"]);
+  });
+
+  it("falls back to clearing everything when the store cannot be enumerated", async () => {
+    // Fails closed: no marker means no offline editing, which costs the user
+    // one trip online. A marker kept without its document would instead open a
+    // live editor on an empty page.
+    const { backend, map } = memoryBackend({ a: 1, b: 2 });
+    backend.keys = async () => {
+      throw new Error("blocked");
+    };
+
+    await clearPageSyncMarkersExcept(["a"], backend);
+
+    expect(map.size).toBe(0);
+  });
+
+  it("never rejects", async () => {
+    await expect(
+      clearPageSyncMarkersExcept(["a"], throwingBackend()),
     ).resolves.toBeUndefined();
   });
 });

@@ -103,10 +103,19 @@ describe("recordDirtyPage", () => {
     });
   });
 
-  it("never throws when the store refuses the write", async () => {
+  it("reports a refused write instead of swallowing it", async () => {
+    // A page that could not be registered is a page a later session expiry
+    // will not know to preserve, so the caller is told rather than left to
+    // assume the edit is tracked.
     await expect(
       recordDirtyPage("page-1", undefined, failingBackend()),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
+  });
+
+  it("reports success on a store that accepts the write", async () => {
+    await expect(recordDirtyPage("page-1", undefined, backend)).resolves.toBe(
+      true,
+    );
   });
 });
 
