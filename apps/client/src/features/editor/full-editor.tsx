@@ -27,6 +27,7 @@ import { DeletedPageBanner } from "@/features/page/trash/components/deleted-page
 import clsx from "clsx";
 import { currentPageEditModeAtom } from "@/features/editor/atoms/editor-atoms.ts";
 import { EmptyPageGetStarted } from "@/features/editor/components/empty-page/empty-page-get-started";
+import { OfflineEditingBanner } from "@/features/offline/offline-editing-banner";
 
 const MemoizedTitleEditor = React.memo(TitleEditor);
 const MemoizedPageEditor = React.memo(PageEditor);
@@ -97,6 +98,7 @@ export function FullEditor({
         <MemoizedFixedToolbar />
       )}
       <MemoizedDeletedPageBanner slugId={slugId} />
+      <OfflineEditingBanner pageId={pageId} />
       <MemoizedTitleEditor
         pageId={pageId}
         slugId={slugId}

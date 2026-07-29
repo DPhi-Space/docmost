@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 import APP_ROUTE from "@/lib/app-route.ts";
 import { isCloud } from "@/lib/config.ts";
+import { clearOfflineDataOnSessionExpiry } from "@/features/offline/session-expiry";
 
 const api: AxiosInstance = axios.create({
   baseURL: "/api",
@@ -68,6 +69,18 @@ api.interceptors.response.use(
 );
 
 function redirectToLogin() {
+  // The *session* is over; the **user has not left this machine**. That is the
+  // whole difference between this and `handleLogout`, and it is why this path
+  // calls `clearOfflineDataOnSessionExpiry()` rather than `clearOfflineData()`:
+  // a 401 must not destroy offline edits that exist nowhere else. See the file
+  // comment in `session-expiry.ts` before collapsing these two back together.
+  //
+  // No query client is available outside React context, but the full-page
+  // navigation below drops the in-memory cache anyway, and persistence is
+  // switched off before the on-disk copy is erased so nothing can be written
+  // back.
+  void clearOfflineDataOnSessionExpiry();
+
   const exemptPaths = [
     APP_ROUTE.AUTH.LOGIN,
     APP_ROUTE.AUTH.SIGNUP,

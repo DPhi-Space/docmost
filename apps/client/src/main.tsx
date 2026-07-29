@@ -11,9 +11,15 @@ import { MantineProvider } from "@mantine/core";
 import { BrowserRouter } from "react-router-dom";
 import { ModalsProvider } from "@mantine/modals";
 import { Notifications } from "@mantine/notifications";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/react-query";
+import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { HelmetProvider } from "react-helmet-async";
 import "./i18n";
+import "@/features/offline/register";
+import {
+  offlinePersistOptions,
+  onQueryCacheRestored,
+} from "@/features/offline/persistence";
 import { PostHogProvider } from "posthog-js/react";
 import {
   getPostHogHost,
@@ -50,14 +56,18 @@ root.render(
   <BrowserRouter>
     <MantineProvider theme={theme} cssVariablesResolver={mantineCssResolver}>
       <ModalsProvider>
-        <QueryClientProvider client={queryClient}>
+        <PersistQueryClientProvider
+          client={queryClient}
+          persistOptions={offlinePersistOptions}
+          onSuccess={() => onQueryCacheRestored(queryClient)}
+        >
           <Notifications position="bottom-center" limit={3} zIndex={10000} />
           <HelmetProvider>
             <PostHogProvider client={posthog}>
               <App />
             </PostHogProvider>
           </HelmetProvider>
-        </QueryClientProvider>
+        </PersistQueryClientProvider>
       </ModalsProvider>
     </MantineProvider>
   </BrowserRouter>,
