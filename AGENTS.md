@@ -77,6 +77,56 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
 
+## Offline/PWA (`apps/client/src/features/offline`, issue #17)
+
+Phase 1a of the offline plan (tracking issue #22): a service worker that makes the **app shell**
+(JS/CSS/fonts/icons/locales) load with no network. Data persistence, offline editing and
+background sync are later phases and are **not** in here. Nothing in this feature touches
+`apps/server/` or the collaboration/persistence path.
+
+**Hand-rolled, not `vite-plugin-pwa`.** `vite-plugin-pwa` 1.3.0 does install and build fine on
+this base (its peer range includes `vite ^8`, and `injectManifest` works under rolldown — both
+verified). It was still not adopted, for three reasons: workbox precaching is **all-or-nothing**
+over a filename glob, which here means a ~20 MB manifest dominated by the 8 MB D2 WASM chunk, so
+one failed request leaves the worker permanently un-activated and the app with *no* offline
+support; the glob sees only content-hashed file names, whereas "the mermaid and D2 chunks" can
+only be identified reliably from the **module graph**; and it costs +55 packages / +712 lockfile
+lines in a repo where the lockfile is load-bearing. The replacement adds **zero dependencies**.
+
+- `build/precache-manifest.ts` — pure classification of the finished bundle into `core`
+  (required, fetched during `install`; ~4.6 MB: entry + its static import closure + their CSS +
+  woff2 fonts + icons + `manifest.json`) and `optional` (best effort, warmed after `activate`;
+  ~10.5 MB: mermaid + D2, matched by **module id**, not by file name). Splitting the two is the
+  whole point: a flaky network must not be able to prevent activation.
+- `build/service-worker-plugin.ts` — the Vite plugin. Classifies in `generateBundle`, then in
+  `closeBundle` runs a second isolated Vite build that compiles `sw/sw.ts` into a classic IIFE.
+- `sw/routes.ts`, `sw/cache-policy.ts` — pure decision logic, unit tested (a service worker
+  cannot be exercised in jsdom, so the decisions live outside the event handlers).
+- `register.ts` / `update-notification.tsx` — registration (production builds only; the dev
+  server has no `/sw.js`) and the update prompt.
+
+**Two constraints you must not break:**
+
+1. **`sw.js` must exist at the dist ROOT before the server boots.**
+   `apps/server/src/integrations/static/static.module.ts` registers `@fastify/static` with
+   `wildcard: false`, which enumerates `client/dist` **once** at registration and creates one
+   route per file. A file that appears later falls through to the SPA catch-all, which answers
+   `text/html` — and the browser rejects a worker script on MIME type. The Docker build already
+   bakes `dist` before boot, so this holds; it breaks if you ever generate `sw.js` at runtime or
+   serve `client/dist` from a volume populated after startup.
+2. **No HTML is ever precached or used as a navigate fallback.** The same module rewrites
+   `client/dist/index.html` at boot to inject `<script>window.CONFIG={…}</script>` (and stores
+   the pristine copy as `index-template.html` **in the same directory**). A build-time HTML file
+   therefore has no `COLLAB_URL`/`CLOUD`/upload limits and breaks the app. `isPrecachableFile`
+   rejects every `.html`, and navigations are **NetworkFirst (3 s timeout)** falling back to a
+   single runtime-cached copy of the last HTML the server actually served.
+
+Other invariants: non-GET requests and `Range` requests are never intercepted; `/collab` and
+`/socket.io` are never routed (they are WebSocket upgrades, but the exclusion is explicit and
+tested); everything under `/api` except `GET /api/files/*` passes through untouched; and the
+worker never calls `skipWaiting()` on its own — a new build waits until the user accepts the
+Mantine prompt, so an editor tab is never reloaded mid-session.
+
 ## Adopting a newer upstream release
 
 ```bash
@@ -125,6 +175,7 @@ gates on the module's absence. Consequences:
 pnpm --filter "@docmost/editor-ext" build          # build shared workspace pkg first
 ( cd apps/client && npx tsc --noEmit )              # expect 0 errors
 ( cd apps/server && npx tsc --noEmit -p tsconfig.json )   # expect 0 errors
+( cd apps/client && npx vitest run )                # expect 0 failures
 
 # end-to-end: rebuild image + boot, then run the repro
 docker compose -f docker-compose.local.yml build docmost
@@ -135,6 +186,25 @@ docker compose -f docker-compose.local.yml up -d    # app on http://localhost:30
 (e.g. a D2 block and an Excalidraw diagram), switch rapidly back and forth many times, then
 reload. Content must survive. A poll of `select octet_length(ydoc), length(text_content) from
 pages` should never show a populated page collapse to ~100–500 bytes with `text=0`.
+
+**Offline/PWA checks** (see the Offline/PWA section above):
+
+```bash
+( cd apps/client && npx vite build )
+test -f apps/client/dist/sw.js                              # must be at the dist ROOT
+grep -c '\.html' apps/client/dist/sw.js                     # must print 0
+```
+
+Then, in a browser against the running container:
+1. Load the app, DevTools → Application → Service Workers: `sw.js` is activated and running.
+2. Open a page containing a mermaid block and one containing a D2 block.
+3. DevTools → Network → Offline, reload: the shell boots (no blank page, no chunk-load errors)
+   and both diagram previews still render.
+4. DevTools → Network → Online: the `/collab` and `/socket.io` WebSockets reconnect normally
+   (the worker must never appear in their request chain).
+5. Deploy a newer build, then reload an old tab: the "A new version is available" prompt
+   appears, "Reload" activates the waiting worker, and `docmost-offline-precache-*` caches from
+   the previous build are gone afterwards. The tab must **not** reload on its own.
 
 ## Deploy (GHCR)
 
