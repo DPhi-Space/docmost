@@ -13,7 +13,15 @@
  *    responses, i.e. attachments;
  * 4. the phase-2 per-page sync markers, which record which pages this user was
  *    allowed to sync — both a small disclosure and, left behind, a way for the
- *    next user of the browser to be handed an offline editor on them.
+ *    next user of the browser to be handed an offline editor on them;
+ * 5. the phase-3 dirty-page registry, which names the pages this user edited
+ *    offline and, for blocked entries, their titles and space slugs. It is the
+ *    most directly readable of the five — and, left behind, it would aim the
+ *    next session's background sync at the previous user's pages.
+ *
+ * Note what deleting (5) *is not*: it does not delete the edits. Those live in
+ * the `page.<pageId>` databases, which step (2) removes in the same pass. The
+ * registry is an index, and it is dropped alongside what it indexes.
  *
  * Called from both exits of an authenticated session: the explicit
  * `handleLogout` and the 401 handler's `redirectToLogin`. Both end in a
@@ -28,6 +36,7 @@ import {
   stopPersistingQueryCache,
 } from "./persisted-store";
 import { clearPageSyncMarkers } from "./sync-markers";
+import { clearDirtyPages } from "./dirty-pages";
 
 /** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
 const PAGE_DB_PREFIX = "page.";
@@ -57,6 +66,8 @@ export interface ClearOfflineDataDeps {
   stopPersistingQueryCache?: () => void;
   /** Phase 2's per-page "has completed a real remote sync" markers. */
   clearPageSyncMarkers?: () => Promise<void>;
+  /** Phase 3's registry of pages with edits that were never pushed. */
+  clearDirtyPages?: () => Promise<void>;
   deleteTimeoutMs?: number;
 }
 
@@ -124,6 +135,7 @@ export async function clearOfflineData(
     deletePersistedQueryCache: deleteCache = deletePersistedQueryCache,
     stopPersistingQueryCache: stopPersisting = stopPersistingQueryCache,
     clearPageSyncMarkers: clearMarkers = clearPageSyncMarkers,
+    clearDirtyPages: clearDirty = clearDirtyPages,
     deleteTimeoutMs = DEFAULT_DELETE_TIMEOUT_MS,
   } = deps;
 
@@ -140,6 +152,7 @@ export async function clearOfflineData(
   await Promise.allSettled([
     deleteCache(),
     clearMarkers(),
+    clearDirty(),
     deletePageDatabases(idb, fallbackNames, deleteTimeoutMs),
     deleteRuntimeCaches(cacheStorage),
   ]);
