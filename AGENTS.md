@@ -466,6 +466,13 @@ periodic timer.
   per-controller; there is no global one), it is excluded from `DomainMiddleware`, from the
   `workspaceId` preHandler and from request logging, and only `auth.controller.ts` is rate limited.
   **Zero server changes**, which is what keeps the offline feature's promise about `apps/server/`.
+- **The probe carries credentials (`same-origin`), and must keep doing so.** The endpoint needs no
+  session, so omitting the cookie looks like hygiene — but behind an authenticating reverse proxy
+  (Cloudflare Access, oauth2-proxy, Authelia) a cookie-less request is redirected to the identity
+  provider, `fetch` follows it cross-origin, and the request rejects on CORS. Every probe would
+  fail forever on a perfectly healthy deployment, and the verdict pauses React Query. There is
+  nothing to protect by omitting: this is our own origin, and every other request the app makes
+  sends the same cookie. Asserted by test.
 - **The service worker must never be allowed to answer it.** `sw/routes.ts` passes through every
   `/api/` path except `/api/files/`, and a test asserts the classification *from the probe
   constant*. `cache: "no-store"` governs the HTTP cache and says nothing about Cache Storage, so a
