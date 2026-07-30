@@ -7,6 +7,15 @@
 
 export const CACHE_PREFIX = "docmost-offline-";
 
+/**
+ * The runtime cache for `GET /api/files/*` bodies. A named constant because it
+ * is shared across contexts: the worker reads and writes it, and the window
+ * context purges stale attachment bytes out of it after an offline Excalidraw
+ * overwrite replays (`upload-replay.ts` — see the stale-editable-base note
+ * there). Deliberately not build-scoped.
+ */
+export const FILES_CACHE_NAME = `${CACHE_PREFIX}files-v1`;
+
 /** Single entry holding the last HTML the server actually served us. */
 export const SHELL_CACHE_KEY = "/__docmost-offline-shell__";
 
@@ -41,7 +50,7 @@ export function cacheNames(buildId: string): CacheNames {
     shell: `${CACHE_PREFIX}shell-v1`,
     assets: `${CACHE_PREFIX}assets-v1`,
     locales: `${CACHE_PREFIX}locales-v1`,
-    files: `${CACHE_PREFIX}files-v1`,
+    files: FILES_CACHE_NAME,
   };
 }
 
