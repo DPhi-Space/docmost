@@ -47,7 +47,15 @@
  * - the sync markers for those same pages, and no others (a marker whose
  *   document has been deleted is the lie `offline-edit-gate.ts` refuses to act
  *   on);
- * - the registry itself, stamped with its owner.
+ * - the registry itself, stamped with its owner;
+ * - the upload outbox (phase 4), whenever it holds records — its blobs are the
+ *   only copy of drawings and files the server never received, and the same
+ *   reasoning applies to them verbatim. An outbox record is self-contained
+ *   (blob + target page + target attachment), so preserving it forces nothing
+ *   else to be preserved with it. Note that the outbox is consulted
+ *   *independently* of the dirty registry: an offline re-save of an existing
+ *   Excalidraw diagram queues an upload without ever touching the page's Yjs
+ *   document, so "no dirty pages" does not imply "no pending work".
  *
  * Everything else still goes: the dehydrated query cache, the runtime caches
  * (attachments included), every other page's database, every other marker. With
@@ -60,6 +68,7 @@ import {
   setOfflineDataOwner,
   type DirtyPagesRead,
 } from "./dirty-pages";
+import { readUploadOutbox, type UploadOutboxRead } from "./upload-outbox";
 import {
   defaultOwnerStorage,
   forgetOfflineDataOwner,
@@ -132,6 +141,7 @@ function writePendingRecovery(
 
 export interface SessionExpiryDeps {
   readDirtyPages?: () => Promise<DirtyPagesRead>;
+  readUploadOutbox?: () => Promise<UploadOutboxRead>;
   setOfflineDataOwner?: (ownerUserId: string) => Promise<boolean>;
   clearOfflineData?: (deps?: ClearOfflineDataDeps) => Promise<void>;
   storage?: StorageLike | null;
@@ -150,6 +160,7 @@ export async function clearOfflineDataOnSessionExpiry(
 ): Promise<void> {
   const {
     readDirtyPages: read = readDirtyPages,
+    readUploadOutbox: readOutbox = readUploadOutbox,
     setOfflineDataOwner: stampOwner = setOfflineDataOwner,
     clearOfflineData: clear = clearOfflineData,
     storage = defaultStorage(),
@@ -177,7 +188,18 @@ export async function clearOfflineDataOnSessionExpiry(
     pending = { readable: false };
   }
 
-  if (pending.readable && pending.records.length === 0) {
+  // The outbox is consulted with the same rules: unreadable means "I cannot
+  // tell", which must preserve, and its records count as pending work even
+  // when no page is dirty (an Excalidraw re-save never touches the ydoc).
+  let outbox: UploadOutboxRead;
+  try {
+    outbox = await readOutbox();
+  } catch {
+    outbox = { readable: false };
+  }
+  const outboxHoldsWork = !outbox.readable || outbox.records.length > 0;
+
+  if (pending.readable && pending.records.length === 0 && !outboxHoldsWork) {
     // Nothing on this device that the server does not already have. There is
     // no work to protect, so the privacy answer wins outright and this is the
     // logout path exactly.
@@ -202,7 +224,11 @@ export async function clearOfflineDataOnSessionExpiry(
   await clear({
     preservePageIds: records.map((record) => record.pageId),
     preserveAllPages,
-    preserveDirtyPages: true,
+    // The dirty registry is preserved only when it indexes preserved documents;
+    // with no dirty pages (outbox-only work) there is nothing for it to index
+    // and `clearOfflineData` clears it as usual.
+    preserveDirtyPages: records.length > 0 || preserveAllPages,
+    preserveUploadOutbox: outboxHoldsWork,
   });
 
   writePendingRecovery(

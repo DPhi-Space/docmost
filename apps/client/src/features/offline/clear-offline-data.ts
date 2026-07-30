@@ -17,7 +17,11 @@
  * 5. the phase-3 dirty-page registry, which names the pages this user edited
  *    offline and, for blocked entries, their titles and space slugs. It is the
  *    most directly readable of the five — and, left behind, it would aim the
- *    next session's background sync at the previous user's pages.
+ *    next session's background sync at the previous user's pages;
+ * 6. the phase-4 upload outbox, which holds the *bodies* of attachments queued
+ *    offline (drawings, pasted images) — user content in full, and, left
+ *    behind, uploads the next session's replay would push under the wrong
+ *    identity.
  *
  * Note what deleting (5) *is not*: it does not delete the edits. Those live in
  * the `page.<pageId>` databases, which step (2) removes in the same pass. The
@@ -52,6 +56,7 @@ import {
   clearPageSyncMarkersExcept,
 } from "./sync-markers";
 import { clearDirtyPages } from "./dirty-pages";
+import { clearUploadOutbox } from "./upload-outbox";
 import { forgetOfflineDataOwner } from "./owner-hint";
 
 /** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
@@ -84,6 +89,8 @@ export interface ClearOfflineDataDeps {
   clearPageSyncMarkers?: () => Promise<void>;
   /** Phase 3's registry of pages with edits that were never pushed. */
   clearDirtyPages?: () => Promise<void>;
+  /** Phase 4's queue of attachment uploads that were never pushed. */
+  clearUploadOutbox?: () => Promise<void>;
   clearPageSyncMarkersExcept?: (keep: readonly string[]) => Promise<void>;
   deleteTimeoutMs?: number;
   /**
@@ -110,6 +117,14 @@ export interface ClearOfflineDataDeps {
    * without its documents is worse than neither.
    */
   preserveDirtyPages?: boolean;
+  /**
+   * Keep the upload outbox. **Only** `clearOfflineDataOnSessionExpiry` passes
+   * this, and only when the outbox holds records: the blobs are the only copy
+   * of drawings and files the server never received. Unlike a `page.*`
+   * database, an outbox record is self-contained (blob + target attachment),
+   * so it needs no companion data preserved alongside it.
+   */
+  preserveUploadOutbox?: boolean;
   /**
    * Also drop the localStorage owner hint. On by default, because every exit
    * this function serves ends the session; session expiry re-writes it after
@@ -184,14 +199,17 @@ export async function clearOfflineData(
     clearPageSyncMarkers: clearMarkers = clearPageSyncMarkers,
     clearPageSyncMarkersExcept: clearMarkersExcept = clearPageSyncMarkersExcept,
     clearDirtyPages: clearDirty = clearDirtyPages,
+    clearUploadOutbox: clearOutbox = clearUploadOutbox,
     deleteTimeoutMs = DEFAULT_DELETE_TIMEOUT_MS,
     preservePageIds = [],
     preserveAllPages = false,
     preserveDirtyPages = false,
+    preserveUploadOutbox = false,
     forgetOwnerHint = forgetOfflineDataOwner,
   } = deps;
 
-  const preservingSomething = preserveAllPages || preservePageIds.length > 0;
+  const preservingSomething =
+    preserveAllPages || preservePageIds.length > 0 || preserveUploadOutbox;
 
   // First, before anything else: make the persister refuse further writes, so a
   // throttled write already in flight cannot restore what we are about to erase.
@@ -220,6 +238,7 @@ export async function clearOfflineData(
     preserveDirtyPages && preservingSomething
       ? Promise.resolve()
       : clearDirty(),
+    preserveUploadOutbox ? Promise.resolve() : clearOutbox(),
     preserveAllPages
       ? Promise.resolve()
       : deletePageDatabases(

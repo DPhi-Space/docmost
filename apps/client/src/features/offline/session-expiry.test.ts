@@ -13,6 +13,7 @@ import {
 } from "./session-expiry";
 import type { ClearOfflineDataDeps } from "./clear-offline-data";
 import type { DirtyPageRecord, DirtyPagesRead } from "./dirty-pages";
+import type { UploadOutboxRecord } from "./upload-outbox";
 
 function memoryStorage(seed: Record<string, string> = {}): StorageLike & {
   map: Map<string, string>;
@@ -34,6 +35,20 @@ const record = (pageId: string, title?: string): DirtyPageRecord => ({
 });
 
 const OWNED = { [OFFLINE_DATA_OWNER_KEY]: "user-1" };
+
+const uploadRecord = (attachmentId: string): UploadOutboxRecord => ({
+  attachmentId,
+  pageId: "page-1",
+  kind: "excalidraw",
+  nodeType: "excalidraw",
+  mode: "overwrite",
+  blob: new Blob(["svg"]),
+  fileName: "diagram.excalidraw.svg",
+  mimeType: "image/svg+xml",
+  createdAt: 1,
+  updatedAt: 1,
+  status: "pending",
+});
 
 describe("clearOfflineDataOnSessionExpiry", () => {
   let cleared: Array<ClearOfflineDataDeps | undefined>;
@@ -60,6 +75,7 @@ describe("clearOfflineDataOnSessionExpiry", () => {
   ) =>
     clearOfflineDataOnSessionExpiry({
       readDirtyPages: async () => pending,
+      readUploadOutbox: async () => ({ readable: true, records: [] }),
       setOfflineDataOwner: stampOwner,
       clearOfflineData: clear,
       storage,
@@ -92,8 +108,70 @@ describe("clearOfflineDataOnSessionExpiry", () => {
         preservePageIds: ["p1", "p2"],
         preserveAllPages: false,
         preserveDirtyPages: true,
+        preserveUploadOutbox: false,
       },
     ]);
+  });
+
+  it("preserves the upload outbox when it holds queued uploads, even with no dirty page", async () => {
+    // An offline re-save of an existing Excalidraw diagram queues an upload
+    // without touching the page's Yjs document, so the dirty registry alone
+    // cannot answer "is anything pending".
+    const storage = memoryStorage(OWNED);
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      {
+        readUploadOutbox: async () => ({
+          readable: true,
+          records: [uploadRecord("att-1")],
+        }),
+      },
+    );
+
+    expect(cleared).toEqual([
+      {
+        preservePageIds: [],
+        preserveAllPages: false,
+        preserveDirtyPages: false,
+        preserveUploadOutbox: true,
+      },
+    ]);
+    expect(stamped).toEqual(["user-1"]);
+    // The hint survives so a later 401 in the same signed-out window cannot
+    // re-run the erase branch against the preserved outbox.
+    expect(readOfflineDataOwnerHint(storage)).toBe("user-1");
+  });
+
+  it("treats an unreadable outbox as pending work, never as empty", async () => {
+    const storage = memoryStorage(OWNED);
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      { readUploadOutbox: async () => ({ readable: false }) },
+    );
+
+    expect(cleared[0]).toMatchObject({ preserveUploadOutbox: true });
+  });
+
+  it("refuses to preserve outbox work without a provable owner", async () => {
+    const storage = memoryStorage();
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      {
+        readUploadOutbox: async () => ({
+          readable: true,
+          records: [uploadRecord("att-1")],
+        }),
+      },
+    );
+
+    expect(cleared).toEqual([undefined]);
+    expect(stamped).toEqual([]);
   });
 
   it("refuses to preserve anything when the owner is unknown", async () => {
@@ -156,7 +234,12 @@ describe("clearOfflineDataOnSessionExpiry", () => {
     await run(storage, { readable: false });
 
     expect(cleared).toEqual([
-      { preservePageIds: [], preserveAllPages: true, preserveDirtyPages: true },
+      {
+        preservePageIds: [],
+        preserveAllPages: true,
+        preserveDirtyPages: true,
+        preserveUploadOutbox: false,
+      },
     ]);
     expect(stamped).toEqual(["user-1"]);
   });
