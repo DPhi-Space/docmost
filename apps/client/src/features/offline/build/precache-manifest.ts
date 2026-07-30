@@ -81,6 +81,38 @@ export const PUBLIC_PRECACHE_PATTERNS: RegExp[] = [
 const CORE_ASSET_EXTENSIONS = [".woff2"];
 
 /**
+ * Self-hosted Excalidraw assets (`excalidraw-assets-plugin.ts`), classified
+ * by their own rules rather than the ones above:
+ *
+ * - **never `core`** — the tree is ~13 MB, and a woff2 rule that swept it into
+ *   the required precache would break the small-`core` property that gates
+ *   worker activation on flaky networks (the entire reason the manifest has
+ *   two buckets);
+ * - the Latin families (~0.5 MB) are `optional`, so the offline Excalidraw
+ *   modal renders with its real fonts after the best-effort warm-up;
+ * - the Xiaolai CJK family alone is ~12 MB across 200+ subset files and is
+ *   left to the runtime asset cache: a user who actually draws CJK text gets
+ *   the needed subsets cached the first time Excalidraw fetches them, and
+ *   everyone else never downloads 12 MB of fonts they will not render.
+ */
+export const EXCALIDRAW_ASSET_PATH_PREFIX = "excalidraw/";
+export const EXCALIDRAW_RUNTIME_ONLY_FONT_DIRS = ["Xiaolai"];
+
+export type ExcalidrawAssetClass = "optional" | "runtime-only";
+
+export function classifyExcalidrawAsset(
+  fileName: string,
+): ExcalidrawAssetClass | null {
+  const normalized = fileName.replace(/^\/+/, "");
+  if (!normalized.startsWith(EXCALIDRAW_ASSET_PATH_PREFIX)) return null;
+  if (!isPrecachableFile(normalized)) return "runtime-only";
+  const runtimeOnly = EXCALIDRAW_RUNTIME_ONLY_FONT_DIRS.some((dir) =>
+    normalized.startsWith(`${EXCALIDRAW_ASSET_PATH_PREFIX}fonts/${dir}/`),
+  );
+  return runtimeOnly ? "runtime-only" : "optional";
+}
+
+/**
  * The one hard rule. Also drops sourcemaps, which are useless offline and
  * needlessly large.
  */
@@ -204,10 +236,12 @@ export function buildPrecacheManifest(
   }
 
   for (const entry of entries) {
-    if (
-      entry.type === "asset" &&
-      CORE_ASSET_EXTENSIONS.some((ext) => entry.fileName.endsWith(ext))
-    ) {
+    if (entry.type !== "asset") continue;
+    // Excalidraw assets have their own classification and must never reach
+    // `core` — the woff2 rule below would otherwise sweep ~13 MB of fonts
+    // into the set that gates worker activation.
+    if (classifyExcalidrawAsset(entry.fileName) !== null) continue;
+    if (CORE_ASSET_EXTENSIONS.some((ext) => entry.fileName.endsWith(ext))) {
       core.add(entry.fileName);
     }
   }
@@ -225,6 +259,12 @@ export function buildPrecacheManifest(
   }
   for (const sheet of optionalCss) {
     if (isPrecachableFile(sheet)) optionalUrls.add(toUrl(sheet));
+  }
+  for (const entry of entries) {
+    if (entry.type !== "asset") continue;
+    if (classifyExcalidrawAsset(entry.fileName) === "optional") {
+      optionalUrls.add(toUrl(entry.fileName));
+    }
   }
   for (const url of coreUrls) optionalUrls.delete(url);
 

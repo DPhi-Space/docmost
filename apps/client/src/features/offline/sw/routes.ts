@@ -38,7 +38,13 @@ export const ASSET_PATH_PREFIX = "/assets/";
 
 /** Public-dir paths served as part of the shell. */
 const SHELL_ASSET_PATHS = ["/manifest.json", "/vite.svg"];
-const SHELL_ASSET_PREFIXES = ["/icons/"];
+/**
+ * `/excalidraw/` holds the self-hosted Excalidraw fonts
+ * (`build/excalidraw-assets-plugin.ts`): immutable package assets, CacheFirst
+ * like everything else here. The Latin families are also warmed into the
+ * precache as `optional` entries; the CJK subsets rely on this runtime route.
+ */
+const SHELL_ASSET_PREFIXES = ["/icons/", "/excalidraw/"];
 
 export function isNavigationRequest(request: RoutableRequest): boolean {
   return request.mode === "navigate" || request.destination === "document";

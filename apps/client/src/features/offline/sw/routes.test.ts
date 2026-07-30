@@ -92,6 +92,21 @@ describe("resolveRoute — assets", () => {
     expect(resolveRoute(req("/manifest.json"), ORIGIN)).toBe("asset");
     expect(resolveRoute(req("/icons/favicon-32x32.png"), ORIGIN)).toBe("asset");
   });
+
+  it("routes the self-hosted Excalidraw fonts to the asset strategy", () => {
+    // The CJK subsets are not precached at all (precache-manifest.ts), so this
+    // runtime route is the only thing that makes them work offline after a
+    // first use.
+    expect(
+      resolveRoute(
+        req("/excalidraw/fonts/Xiaolai/Xiaolai-Regular-019d.woff2"),
+        ORIGIN,
+      ),
+    ).toBe("asset");
+    expect(
+      resolveRoute(req("/excalidraw/fonts/Virgil/Virgil-Regular.woff2"), ORIGIN),
+    ).toBe("asset");
+  });
 });
 
 describe("resolveRoute — locales and files", () => {
