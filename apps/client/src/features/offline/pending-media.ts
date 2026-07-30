@@ -26,6 +26,14 @@
  * with SW disabled) a pending node renders as a broken image until the upload
  * replays. Production always has the worker; the trade buys zero diffs to four
  * upstream node views.
+ *
+ * One node type is excepted: **a pending video does not preview.** Browsers
+ * fetch `<video>` with a `Range` header, and the worker passes every Range
+ * request through untouched — a load-bearing, pre-existing invariant (a full
+ * cached body answered to a Range request, or a stored 206, corrupts media
+ * playback). The blob is safe in the outbox and uploads like everything else;
+ * only the pending preview is missing. Documented in AGENTS.md rather than
+ * worked around, because the workaround would weaken that invariant.
  */
 
 import type { Editor } from "@tiptap/core";
