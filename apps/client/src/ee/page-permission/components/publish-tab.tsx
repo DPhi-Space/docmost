@@ -56,6 +56,13 @@ type PublishTabProps = {
   spaceSharingDisabled?: boolean;
 };
 
+type SlugDraft = {
+  shareId: string;
+  sourceSlug: string;
+  value: string;
+  error: string | null;
+};
+
 export function PublishTab({
   pageId,
   readOnly,
@@ -80,24 +87,29 @@ export function PublishTab({
   const publicLink = `${getAppUrl()}/share/${publicIdentifier}/p/${pageSlug}`;
 
   const [isPagePublic, setIsPagePublic] = useState<boolean>(false);
-  const [slugInput, setSlugInput] = useState<string>("");
-  const [slugError, setSlugError] = useState<string | null>(null);
+  const [slugDraft, setSlugDraft] = useState<SlugDraft | null>(null);
 
   useEffect(() => {
     setIsPagePublic(!!share);
   }, [share, pageId]);
 
-  useEffect(() => {
-    setSlugInput(share?.slug ?? "");
-    setSlugError(null);
-  }, [share?.slug, share?.id]);
+  const sourceSlug = share?.slug ?? "";
+  const isCurrentSlugDraft =
+    slugDraft?.shareId === share?.id && slugDraft.sourceSlug === sourceSlug;
+  const slugInput = isCurrentSlugDraft ? slugDraft.value : sourceSlug;
+  const slugError = isCurrentSlugDraft ? slugDraft.error : null;
+
+  const updateSlugDraft = (value: string, error: string | null = null) => {
+    if (!share?.id) return;
+    setSlugDraft({ shareId: share.id, sourceSlug, value, error });
+  };
 
   const handleSlugSave = async () => {
     if (!share?.id) return;
     const value = slugInput.trim();
     const validationError = validateSlug(value, t);
     if (validationError) {
-      setSlugError(validationError);
+      updateSlugDraft(slugInput, validationError);
       return;
     }
     try {
@@ -105,9 +117,10 @@ export function PublishTab({
         shareId: share.id,
         slug: value.length > 0 ? value : null,
       });
-      setSlugError(null);
+      updateSlugDraft(slugInput);
     } catch (err) {
-      setSlugError(
+      updateSlugDraft(
+        slugInput,
         err?.["response"]?.data?.message ||
           t("This share slug is already in use"),
       );
@@ -320,8 +333,7 @@ export function PublishTab({
                 placeholder={share.key}
                 value={slugInput}
                 onChange={(event) => {
-                  setSlugInput(event.currentTarget.value);
-                  setSlugError(null);
+                  updateSlugDraft(event.currentTarget.value);
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
