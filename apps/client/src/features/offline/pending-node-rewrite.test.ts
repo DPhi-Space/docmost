@@ -137,6 +137,44 @@ describe("rewritePendingNode", () => {
     });
   });
 
+  it("never introduces src onto an excalidraw node that has none", () => {
+    // A src-less excalidraw node is the "double-click to edit" card produced
+    // by the modal's autosave (updateSrc=false). Adding src would flip it into
+    // the image view and recreate the node view — tearing down the modal if
+    // the user is drawing in it. The id is rewritten; src stays absent.
+    const editor = fakeEditor([
+      {
+        type: { name: "excalidraw" },
+        attrs: { attachmentId: "placeholder-id", src: null },
+      },
+    ]);
+
+    const outcome = rewritePendingNode(
+      editor,
+      record({ nodeType: "excalidraw", kind: "excalidraw" }),
+    );
+
+    expect(outcome).toBe("rewritten");
+    expect(editor.markups[0].attrs.attachmentId).toBe("server-id");
+    expect(editor.markups[0].attrs).not.toHaveProperty("src");
+  });
+
+  it("still rewrites src on an excalidraw node that already has one", () => {
+    const editor = fakeEditor([
+      {
+        type: { name: "excalidraw" },
+        attrs: { attachmentId: "placeholder-id", src: "/api/files/placeholder-id/d.svg?t=1" },
+      },
+    ]);
+
+    rewritePendingNode(
+      editor,
+      record({ nodeType: "excalidraw", kind: "excalidraw" }),
+    );
+
+    expect(editor.markups[0].attrs.src).toContain("/api/files/server-id/");
+  });
+
   it("only touches nodes of the record's type", () => {
     const editor = fakeEditor([
       { type: { name: "video" }, attrs: { attachmentId: "placeholder-id" } },
