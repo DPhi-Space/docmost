@@ -11,8 +11,18 @@ import {
   type SessionExpiryDeps,
   type StorageLike,
 } from "./session-expiry";
-import type { ClearOfflineDataDeps } from "./clear-offline-data";
-import type { DirtyPageRecord, DirtyPagesRead } from "./dirty-pages";
+import {
+  clearOfflineData,
+  type ClearOfflineDataDeps,
+} from "./clear-offline-data";
+import {
+  clearDirtyPages,
+  readDirtyPages,
+  readOfflineDataOwner,
+  setOfflineDataOwner,
+  type DirtyPageRecord,
+  type DirtyPagesRead,
+} from "./dirty-pages";
 import type { UploadOutboxRecord } from "./upload-outbox";
 
 function memoryStorage(seed: Record<string, string> = {}): StorageLike & {
@@ -134,7 +144,10 @@ describe("clearOfflineDataOnSessionExpiry", () => {
       {
         preservePageIds: [],
         preserveAllPages: false,
-        preserveDirtyPages: false,
+        // True even with no dirty page: the owner stamp lives INSIDE the
+        // dirty store, and clearing it would orphan the preserved outbox from
+        // its proof of ownership — the state reconcile then erases.
+        preserveDirtyPages: true,
         preserveUploadOutbox: true,
       },
     ]);
@@ -142,6 +155,51 @@ describe("clearOfflineDataOnSessionExpiry", () => {
     // The hint survives so a later 401 in the same signed-out window cannot
     // re-run the erase branch against the preserved outbox.
     expect(readOfflineDataOwnerHint(storage)).toBe("user-1");
+  });
+
+  it("keeps the owner stamp readable beside an outbox-only preservation (end to end)", async () => {
+    // F1 regression: the mocked `clear` above cannot see that clearDirtyPages()
+    // wipes the whole store, reserved owner key included. This wires the REAL
+    // clearOfflineData + REAL dirty-page store functions over a memory backend
+    // and asserts the stamp written before the clear is still there after it.
+    const dirtyMap = new Map<string, DirtyPageRecord>();
+    const dirtyBackend = {
+      get: async (key: string) => dirtyMap.get(key),
+      set: async (key: string, value: DirtyPageRecord) =>
+        void dirtyMap.set(key, value),
+      del: async (key: string) => void dirtyMap.delete(key),
+      entries: async () => [...dirtyMap.entries()],
+      clear: async () => dirtyMap.clear(),
+    };
+    const storage = memoryStorage(OWNED);
+
+    await clearOfflineDataOnSessionExpiry({
+      storage,
+      readDirtyPages: () => readDirtyPages(dirtyBackend),
+      readUploadOutbox: async () => ({
+        readable: true,
+        records: [uploadRecord("att-1")],
+      }),
+      setOfflineDataOwner: (id) => setOfflineDataOwner(id, dirtyBackend),
+      clearOfflineData: (deps) =>
+        clearOfflineData({
+          ...deps,
+          indexedDB: null,
+          caches: null,
+          deletePersistedQueryCache: async () => {},
+          stopPersistingQueryCache: () => {},
+          clearPageSyncMarkers: async () => {},
+          clearPageSyncMarkersExcept: async () => {},
+          clearDirtyPages: () => clearDirtyPages(dirtyBackend),
+          clearUploadOutbox: async () => {},
+          forgetOwnerHint: () => forgetOfflineDataOwner(storage),
+        }),
+    });
+
+    await expect(readOfflineDataOwner(dirtyBackend)).resolves.toEqual({
+      status: "known",
+      ownerUserId: "user-1",
+    });
   });
 
   it("treats an unreadable outbox as pending work, never as empty", async () => {
