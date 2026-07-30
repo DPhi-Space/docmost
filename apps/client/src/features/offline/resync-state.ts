@@ -14,6 +14,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { DirtyPageRecord } from "./dirty-pages";
+import type { UploadOutboxRecord } from "./upload-outbox";
 
 export interface ResyncPassResult {
   at: number;
@@ -21,6 +22,8 @@ export interface ResyncPassResult {
   synced: number;
   /** Pages the server refused in this pass. */
   blocked: number;
+  /** Phase 4: queued uploads pushed to the server in this pass. */
+  uploadedFiles?: number;
 }
 
 export interface ResyncState {
@@ -31,6 +34,10 @@ export interface ResyncState {
   completed: number;
   /** Every entry the registry currently holds as blocked, oldest first. */
   blocked: readonly DirtyPageRecord[];
+  /** Phase 4: uploads waiting in the outbox (pending, not yet on the server). */
+  pendingUploads: number;
+  /** Phase 4: outbox entries the server refused, oldest first. */
+  blockedUploads: readonly UploadOutboxRecord[];
   lastPass: ResyncPassResult | null;
 }
 
@@ -39,6 +46,8 @@ const EMPTY: ResyncState = {
   total: 0,
   completed: 0,
   blocked: [],
+  pendingUploads: 0,
+  blockedUploads: [],
   lastPass: null,
 };
 
@@ -56,6 +65,8 @@ export function setResyncState(next: Partial<ResyncState>): void {
     merged.total === state.total &&
     merged.completed === state.completed &&
     merged.blocked === state.blocked &&
+    merged.pendingUploads === state.pendingUploads &&
+    merged.blockedUploads === state.blockedUploads &&
     merged.lastPass === state.lastPass
   ) {
     return;

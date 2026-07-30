@@ -3,6 +3,7 @@ import { uploadVideoAction } from "@/features/editor/components/video/upload-vid
 import { uploadAttachmentAction } from "../attachment/upload-attachment-action";
 import { uploadPdfAction } from "../pdf/upload-pdf-action";
 import { createMentionAction } from "@/features/editor/components/link/internal-link-paste.ts";
+import { queueMediaFilesOffline } from "@/features/offline/offline-uploads";
 import { INTERNAL_LINK_REGEX } from "@/lib/constants.ts";
 import { Editor } from "@tiptap/core";
 import {
@@ -62,6 +63,18 @@ export const handlePaste = (
 
   if (event.clipboardData?.files.length && !hasHtmlTable) {
     event.preventDefault();
+    // Offline (switch on, server unreachable): queue instead of uploading.
+    // Returns false in every other session; see features/offline.
+    if (
+      queueMediaFilesOffline(
+        editor,
+        [...event.clipboardData.files],
+        editor.state.selection.from,
+        pageId,
+      )
+    ) {
+      return true;
+    }
     for (const file of event.clipboardData.files) {
       const pos = editor.state.selection.from;
       uploadImageAction(file, editor, pos, pageId);
@@ -226,6 +239,22 @@ export const handleFileDrop = (
 ) => {
   if (!moved && event.dataTransfer?.files.length) {
     event.preventDefault();
+
+    // Offline (switch on, server unreachable): queue instead of uploading.
+    const dropPos = editor.view.posAtCoords({
+      left: event.clientX,
+      top: event.clientY,
+    })?.pos;
+    if (
+      queueMediaFilesOffline(
+        editor,
+        [...event.dataTransfer.files],
+        dropPos ?? editor.state.selection.from,
+        pageId,
+      )
+    ) {
+      return true;
+    }
 
     for (const file of event.dataTransfer.files) {
       const coordinates = editor.view.posAtCoords({

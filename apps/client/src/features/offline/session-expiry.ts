@@ -47,7 +47,15 @@
  * - the sync markers for those same pages, and no others (a marker whose
  *   document has been deleted is the lie `offline-edit-gate.ts` refuses to act
  *   on);
- * - the registry itself, stamped with its owner.
+ * - the registry itself, stamped with its owner;
+ * - the upload outbox (phase 4), whenever it holds records — its blobs are the
+ *   only copy of drawings and files the server never received, and the same
+ *   reasoning applies to them verbatim. An outbox record is self-contained
+ *   (blob + target page + target attachment), so preserving it forces nothing
+ *   else to be preserved with it. Note that the outbox is consulted
+ *   *independently* of the dirty registry: an offline re-save of an existing
+ *   Excalidraw diagram queues an upload without ever touching the page's Yjs
+ *   document, so "no dirty pages" does not imply "no pending work".
  *
  * Everything else still goes: the dehydrated query cache, the runtime caches
  * (attachments included), every other page's database, every other marker. With
@@ -60,6 +68,7 @@ import {
   setOfflineDataOwner,
   type DirtyPagesRead,
 } from "./dirty-pages";
+import { readUploadOutbox, type UploadOutboxRead } from "./upload-outbox";
 import {
   defaultOwnerStorage,
   forgetOfflineDataOwner,
@@ -86,6 +95,24 @@ export interface PendingRecoveryNotice {
   at: number;
   ownerUserId: string;
   pages: PendingRecoveryPage[];
+  /**
+   * Queued attachment uploads preserved alongside the pages (phase 4). Absent
+   * in notices written before this field existed; those still validate on
+   * `pages` alone. An outbox that could not be read is preserved but cannot be
+   * counted — that case writes `uploads: 0` and the notice (if any) stands on
+   * the pages, which matches what can honestly be claimed.
+   */
+  uploads?: number;
+}
+
+/** A notice is worth showing iff it names at least one page or one upload. */
+export function isNoticeWorthShowing(
+  notice: PendingRecoveryNotice | null | undefined,
+): notice is PendingRecoveryNotice {
+  if (!notice) return false;
+  const pages = Array.isArray(notice.pages) ? notice.pages.length : 0;
+  const uploads = typeof notice.uploads === "number" ? notice.uploads : 0;
+  return pages > 0 || uploads > 0;
 }
 
 const defaultStorage = defaultOwnerStorage;
@@ -97,9 +124,11 @@ export function readPendingRecovery(
     const raw = storage?.getItem(PENDING_RECOVERY_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PendingRecoveryNotice;
-    return Array.isArray(parsed?.pages) && parsed.pages.length > 0
-      ? parsed
-      : null;
+    if (!Array.isArray(parsed?.pages)) return null;
+    // Outbox-only preservation is real preserved work (an Excalidraw re-save
+    // never touches the ydoc), so a notice with zero pages but a positive
+    // upload count must render, not read as empty (gap #5 of the #21 review).
+    return isNoticeWorthShowing(parsed) ? parsed : null;
   } catch {
     // A corrupt notice must not break the login page.
     return null;
@@ -132,6 +161,7 @@ function writePendingRecovery(
 
 export interface SessionExpiryDeps {
   readDirtyPages?: () => Promise<DirtyPagesRead>;
+  readUploadOutbox?: () => Promise<UploadOutboxRead>;
   setOfflineDataOwner?: (ownerUserId: string) => Promise<boolean>;
   clearOfflineData?: (deps?: ClearOfflineDataDeps) => Promise<void>;
   storage?: StorageLike | null;
@@ -150,6 +180,7 @@ export async function clearOfflineDataOnSessionExpiry(
 ): Promise<void> {
   const {
     readDirtyPages: read = readDirtyPages,
+    readUploadOutbox: readOutbox = readUploadOutbox,
     setOfflineDataOwner: stampOwner = setOfflineDataOwner,
     clearOfflineData: clear = clearOfflineData,
     storage = defaultStorage(),
@@ -177,7 +208,18 @@ export async function clearOfflineDataOnSessionExpiry(
     pending = { readable: false };
   }
 
-  if (pending.readable && pending.records.length === 0) {
+  // The outbox is consulted with the same rules: unreadable means "I cannot
+  // tell", which must preserve, and its records count as pending work even
+  // when no page is dirty (an Excalidraw re-save never touches the ydoc).
+  let outbox: UploadOutboxRead;
+  try {
+    outbox = await readOutbox();
+  } catch {
+    outbox = { readable: false };
+  }
+  const outboxHoldsWork = !outbox.readable || outbox.records.length > 0;
+
+  if (pending.readable && pending.records.length === 0 && !outboxHoldsWork) {
     // Nothing on this device that the server does not already have. There is
     // no work to protect, so the privacy answer wins outright and this is the
     // logout path exactly.
@@ -202,7 +244,19 @@ export async function clearOfflineDataOnSessionExpiry(
   await clear({
     preservePageIds: records.map((record) => record.pageId),
     preserveAllPages,
-    preserveDirtyPages: true,
+    /**
+     * The dirty-page STORE is preserved whenever *anything* is preserved —
+     * including outbox-only work — because the owner stamp lives inside it
+     * (`OFFLINE_DATA_OWNER_RECORD_KEY`), and `clearDirtyPages()` wipes the
+     * whole store, stamp included. An earlier version cleared it in the
+     * outbox-only case, which stamped the owner and then destroyed the stamp
+     * in the very next call: the preserved blobs were left unattributable,
+     * which is the state reconcile erases (rule 1 — the stamp beside the data
+     * IS the proof). An empty-but-stamped registry is harmless: the reserved
+     * key is not a page record and every listing filters it out.
+     */
+    preserveDirtyPages: records.length > 0 || preserveAllPages || outboxHoldsWork,
+    preserveUploadOutbox: outboxHoldsWork,
   });
 
   writePendingRecovery(
@@ -213,6 +267,10 @@ export async function clearOfflineDataOnSessionExpiry(
         pageId: record.pageId,
         title: record.link?.title,
       })),
+      // Counted only when the outbox could be read; an unreadable outbox is
+      // preserved but cannot honestly be counted, and the notice must never
+      // claim uploads that may not exist.
+      uploads: outbox.readable ? outbox.records.length : 0,
     },
     storage,
   );

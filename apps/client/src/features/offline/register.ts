@@ -6,11 +6,16 @@
  * which matters for rebase friendliness against upstream.
  */
 
+import { installExcalidrawAssetPath } from "./excalidraw-assets";
 import { createUpdateController } from "./update-state";
 import {
   hideUpdateNotification,
   showUpdateNotification,
 } from "./update-notification";
+
+// Both dev and production: harmless where the assets are absent (Excalidraw
+// falls back to its CDN), and required before its lazy chunk evaluates.
+installExcalidrawAssetPath();
 
 const SW_URL = "/sw.js";
 const SW_SCOPE = "/";

@@ -11,8 +11,19 @@ import {
   type SessionExpiryDeps,
   type StorageLike,
 } from "./session-expiry";
-import type { ClearOfflineDataDeps } from "./clear-offline-data";
-import type { DirtyPageRecord, DirtyPagesRead } from "./dirty-pages";
+import {
+  clearOfflineData,
+  type ClearOfflineDataDeps,
+} from "./clear-offline-data";
+import {
+  clearDirtyPages,
+  readDirtyPages,
+  readOfflineDataOwner,
+  setOfflineDataOwner,
+  type DirtyPageRecord,
+  type DirtyPagesRead,
+} from "./dirty-pages";
+import type { UploadOutboxRecord } from "./upload-outbox";
 
 function memoryStorage(seed: Record<string, string> = {}): StorageLike & {
   map: Map<string, string>;
@@ -34,6 +45,20 @@ const record = (pageId: string, title?: string): DirtyPageRecord => ({
 });
 
 const OWNED = { [OFFLINE_DATA_OWNER_KEY]: "user-1" };
+
+const uploadRecord = (attachmentId: string): UploadOutboxRecord => ({
+  attachmentId,
+  pageId: "page-1",
+  kind: "excalidraw",
+  nodeType: "excalidraw",
+  mode: "overwrite",
+  blob: new Blob(["svg"]),
+  fileName: "diagram.excalidraw.svg",
+  mimeType: "image/svg+xml",
+  createdAt: 1,
+  updatedAt: 1,
+  status: "pending",
+});
 
 describe("clearOfflineDataOnSessionExpiry", () => {
   let cleared: Array<ClearOfflineDataDeps | undefined>;
@@ -60,6 +85,7 @@ describe("clearOfflineDataOnSessionExpiry", () => {
   ) =>
     clearOfflineDataOnSessionExpiry({
       readDirtyPages: async () => pending,
+      readUploadOutbox: async () => ({ readable: true, records: [] }),
       setOfflineDataOwner: stampOwner,
       clearOfflineData: clear,
       storage,
@@ -92,8 +118,123 @@ describe("clearOfflineDataOnSessionExpiry", () => {
         preservePageIds: ["p1", "p2"],
         preserveAllPages: false,
         preserveDirtyPages: true,
+        preserveUploadOutbox: false,
       },
     ]);
+  });
+
+  it("preserves the upload outbox when it holds queued uploads, even with no dirty page", async () => {
+    // An offline re-save of an existing Excalidraw diagram queues an upload
+    // without touching the page's Yjs document, so the dirty registry alone
+    // cannot answer "is anything pending".
+    const storage = memoryStorage(OWNED);
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      {
+        readUploadOutbox: async () => ({
+          readable: true,
+          records: [uploadRecord("att-1")],
+        }),
+      },
+    );
+
+    expect(cleared).toEqual([
+      {
+        preservePageIds: [],
+        preserveAllPages: false,
+        // True even with no dirty page: the owner stamp lives INSIDE the
+        // dirty store, and clearing it would orphan the preserved outbox from
+        // its proof of ownership — the state reconcile then erases.
+        preserveDirtyPages: true,
+        preserveUploadOutbox: true,
+      },
+    ]);
+    expect(stamped).toEqual(["user-1"]);
+    // The hint survives so a later 401 in the same signed-out window cannot
+    // re-run the erase branch against the preserved outbox.
+    expect(readOfflineDataOwnerHint(storage)).toBe("user-1");
+    // And the login page is told about the queued upload (gap #5): the notice
+    // used to carry pages only, so outbox-only preservation announced nothing.
+    const notice = readPendingRecovery(storage);
+    expect(notice).not.toBeNull();
+    expect(notice?.uploads).toBe(1);
+  });
+
+  it("keeps the owner stamp readable beside an outbox-only preservation (end to end)", async () => {
+    // F1 regression: the mocked `clear` above cannot see that clearDirtyPages()
+    // wipes the whole store, reserved owner key included. This wires the REAL
+    // clearOfflineData + REAL dirty-page store functions over a memory backend
+    // and asserts the stamp written before the clear is still there after it.
+    const dirtyMap = new Map<string, DirtyPageRecord>();
+    const dirtyBackend = {
+      get: async (key: string) => dirtyMap.get(key),
+      set: async (key: string, value: DirtyPageRecord) =>
+        void dirtyMap.set(key, value),
+      del: async (key: string) => void dirtyMap.delete(key),
+      entries: async () => [...dirtyMap.entries()],
+      clear: async () => dirtyMap.clear(),
+    };
+    const storage = memoryStorage(OWNED);
+
+    await clearOfflineDataOnSessionExpiry({
+      storage,
+      readDirtyPages: () => readDirtyPages(dirtyBackend),
+      readUploadOutbox: async () => ({
+        readable: true,
+        records: [uploadRecord("att-1")],
+      }),
+      setOfflineDataOwner: (id) => setOfflineDataOwner(id, dirtyBackend),
+      clearOfflineData: (deps) =>
+        clearOfflineData({
+          ...deps,
+          indexedDB: null,
+          caches: null,
+          deletePersistedQueryCache: async () => {},
+          stopPersistingQueryCache: () => {},
+          clearPageSyncMarkers: async () => {},
+          clearPageSyncMarkersExcept: async () => {},
+          clearDirtyPages: () => clearDirtyPages(dirtyBackend),
+          clearUploadOutbox: async () => {},
+          forgetOwnerHint: () => forgetOfflineDataOwner(storage),
+        }),
+    });
+
+    await expect(readOfflineDataOwner(dirtyBackend)).resolves.toEqual({
+      status: "known",
+      ownerUserId: "user-1",
+    });
+  });
+
+  it("treats an unreadable outbox as pending work, never as empty", async () => {
+    const storage = memoryStorage(OWNED);
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      { readUploadOutbox: async () => ({ readable: false }) },
+    );
+
+    expect(cleared[0]).toMatchObject({ preserveUploadOutbox: true });
+  });
+
+  it("refuses to preserve outbox work without a provable owner", async () => {
+    const storage = memoryStorage();
+
+    await run(
+      storage,
+      { readable: true, records: [] },
+      {
+        readUploadOutbox: async () => ({
+          readable: true,
+          records: [uploadRecord("att-1")],
+        }),
+      },
+    );
+
+    expect(cleared).toEqual([undefined]);
+    expect(stamped).toEqual([]);
   });
 
   it("refuses to preserve anything when the owner is unknown", async () => {
@@ -156,7 +297,12 @@ describe("clearOfflineDataOnSessionExpiry", () => {
     await run(storage, { readable: false });
 
     expect(cleared).toEqual([
-      { preservePageIds: [], preserveAllPages: true, preserveDirtyPages: true },
+      {
+        preservePageIds: [],
+        preserveAllPages: true,
+        preserveDirtyPages: true,
+        preserveUploadOutbox: false,
+      },
     ]);
     expect(stamped).toEqual(["user-1"]);
   });
@@ -185,6 +331,7 @@ describe("clearOfflineDataOnSessionExpiry", () => {
       at: 1234,
       ownerUserId: "user-1",
       pages: [{ pageId: "p1", title: "Notes" }],
+      uploads: 0,
     });
   });
 
@@ -231,7 +378,7 @@ describe("readPendingRecovery", () => {
     ).toBeNull();
   });
 
-  it("ignores a record that names no pages", () => {
+  it("ignores a record that names no pages and no uploads", () => {
     expect(
       readPendingRecovery(
         memoryStorage({
@@ -239,6 +386,48 @@ describe("readPendingRecovery", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      readPendingRecovery(
+        memoryStorage({
+          [PENDING_RECOVERY_KEY]: JSON.stringify({
+            at: 1,
+            pages: [],
+            uploads: 0,
+          }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("renders a notice for outbox-only preserved work (gap #5)", () => {
+    // An Excalidraw re-save queues an upload without touching the ydoc, so a
+    // session can expire holding uploads but zero dirty pages. The notice used
+    // to read that state as "nothing preserved" and render nothing.
+    const notice = readPendingRecovery(
+      memoryStorage({
+        [PENDING_RECOVERY_KEY]: JSON.stringify({
+          at: 1,
+          ownerUserId: "user-1",
+          pages: [],
+          uploads: 2,
+        }),
+      }),
+    );
+    expect(notice).not.toBeNull();
+    expect(notice?.uploads).toBe(2);
+  });
+
+  it("still accepts pre-#21 notices that carry only pages", () => {
+    const notice = readPendingRecovery(
+      memoryStorage({
+        [PENDING_RECOVERY_KEY]: JSON.stringify({
+          at: 1,
+          ownerUserId: "user-1",
+          pages: [{ pageId: "p1", title: "Notes" }],
+        }),
+      }),
+    );
+    expect(notice?.pages).toHaveLength(1);
   });
 
   it("tolerates storage that throws", () => {

@@ -19,14 +19,20 @@ import type {
   DirtyPagesRead,
   OfflineDataOwner,
 } from "./dirty-pages";
+import type { UploadOutboxRead, UploadOutboxRecord } from "./upload-outbox";
 
-function harness(owner: OfflineDataOwner, pages: DirtyPagesRead = { readable: true, records: [] }) {
+function harness(
+  owner: OfflineDataOwner,
+  pages: DirtyPagesRead = { readable: true, records: [] },
+  outbox: UploadOutboxRead = { readable: true, records: [] },
+) {
   const cleared: string[] = [];
   return {
     cleared,
     deps: {
       readOfflineDataOwner: async () => owner,
       readDirtyPages: async () => pages,
+      readUploadOutbox: async () => outbox,
       clearOfflineData: async () => {
         cleared.push("cleared");
       },
@@ -38,6 +44,20 @@ const record = (pageId: string): DirtyPageRecord => ({
   pageId,
   dirtySince: 1,
   updatedAt: 1,
+});
+
+const uploadRecord = (attachmentId: string): UploadOutboxRecord => ({
+  attachmentId,
+  pageId: "page-1",
+  kind: "excalidraw",
+  nodeType: "excalidraw",
+  mode: "overwrite",
+  blob: new Blob(["svg"]),
+  fileName: "diagram.excalidraw.svg",
+  mimeType: "image/svg+xml",
+  createdAt: 1,
+  updatedAt: 1,
+  status: "pending",
 });
 
 describe("offlineDataIsOurs", () => {
@@ -94,6 +114,54 @@ describe("reconcileOfflineDataOwnership", () => {
     expect(h.cleared).toEqual(["cleared"]);
   });
 
+  it("erases unstamped disks whose UPLOAD OUTBOX holds work, even with no dirty page", async () => {
+    // The leak this pins: an Excalidraw re-save queues a blob without touching
+    // any ydoc, so the dirty registry alone reads such a disk as clean — and
+    // the previous user's drawing would replay under the next user's cookie
+    // (or be offered to them as a Download from the blocked list).
+    const h = harness(
+      { status: "none" },
+      { readable: true, records: [] },
+      { readable: true, records: [uploadRecord("att-1")] },
+    );
+
+    await expect(reconcileOfflineDataOwnership("user-2", h.deps)).resolves.toBe(
+      "erased",
+    );
+
+    expect(h.cleared).toEqual(["cleared"]);
+    expect(offlineDataIsOurs()).toBe(true); // erased, then opened
+  });
+
+  it("erases when the stamp is absent and the outbox cannot be read", async () => {
+    // "I cannot tell what the outbox holds" must never read as "it is empty".
+    const h = harness(
+      { status: "none" },
+      { readable: true, records: [] },
+      { readable: false },
+    );
+
+    await expect(reconcileOfflineDataOwnership("user-2", h.deps)).resolves.toBe(
+      "erased",
+    );
+
+    expect(h.cleared).toEqual(["cleared"]);
+  });
+
+  it("still reads a genuinely fresh browser as clean — empty registry AND empty outbox", async () => {
+    const h = harness(
+      { status: "none" },
+      { readable: true, records: [] },
+      { readable: true, records: [] },
+    );
+
+    await expect(reconcileOfflineDataOwnership("user-1", h.deps)).resolves.toBe(
+      "clean",
+    );
+
+    expect(h.cleared).toEqual([]);
+  });
+
   it("does not consult the records once the stamp answers", async () => {
     // The stamp is the answer when it exists; the record check is only the
     // fallback for the case where it does not.
@@ -103,6 +171,10 @@ describe("reconcileOfflineDataOwnership", () => {
     await reconcileOfflineDataOwnership("user-1", {
       ...h.deps,
       readDirtyPages: async () => {
+        asked += 1;
+        return { readable: true, records: [] };
+      },
+      readUploadOutbox: async () => {
         asked += 1;
         return { readable: true, records: [] };
       },

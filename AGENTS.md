@@ -47,6 +47,12 @@ On top of the `v0.95.0` base:
   turned on `navigator.onLine`, which reports `true` with no network at all whenever a VPN
   interface is up, so offline editing did not work on a real deployment. See **Detecting offline**
   below. Still zero `apps/server/` changes and *no further* lines in `page-editor.tsx`.
+- `feat(offline): attachment upload outbox (#21)` — Excalidraw saves and pasted/dropped media
+  while the server is unreachable, replayed through the #20 manager; plus self-hosted Excalidraw
+  fonts and `navigator.storage.persist()`. See **Attachment upload outbox** below. Zero
+  `apps/server/` changes, zero further lines in `page-editor.tsx`; the client call-site delta is
+  three files (both Excalidraw components and the paste/drop handler), each importing exactly one
+  `features/offline` module.
 - `spike: vim keybindings (#26)` — client-only modal editing in the page editor, off by default
   behind a user preference (see **Vim keybindings** below). Server delta is one DTO field and one
   `updatePreference` branch.
@@ -98,9 +104,9 @@ mean editing collaboration code, which is the one area this fork keeps untouched
 
 Phase 1a of the offline plan (tracking issue #22): a service worker that makes the **app shell**
 (JS/CSS/fonts/icons/locales) load with no network. Data persistence is #18, offline editing is
-#19 and background sync is #20, all below; uploads (#21) are still unbuilt. Nothing in **this**
-sub-section touches `apps/server/` or the collaboration/persistence path — the whole feature
-makes zero server changes, and only #19 patches a collaboration-adjacent client file.
+#19, background sync is #20 and the attachment upload outbox is #21, all below. Nothing in
+**this** sub-section touches `apps/server/` or the collaboration/persistence path — the whole
+feature makes zero server changes, and only #19 patches a collaboration-adjacent client file.
 
 **Hand-rolled, not `vite-plugin-pwa`.** `vite-plugin-pwa` 1.3.0 does install and build fine on
 this base (its peer range includes `vite ^8`, and `injectManifest` works under rolldown — both
@@ -228,6 +234,17 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   registry lists, the sync markers for **those pages only** (a marker without its document is
   the state the gate now refuses to trust), and the registry itself — and erases everything
   else. With nothing pending it is byte-for-byte the logout path.
+  **The explicit logout's client-side exit is unstoppable** (`logout-exit.ts`, PR #42 review
+  BUG 2): `handleLogout` used to `await logout()` before the cleanup, so logging out while the
+  server was unreachable rejected with a transport error, ran no cleanup, never navigated, and
+  wedged the app on a stuck error screen that survived reload — defeating the shared-machine
+  privacy exit at exactly the moment it matters (people log out as they walk away). The server
+  call is now best-effort; `clearOfflineData()` and the navigation to the login page always run.
+  **The unavoidable residue, stated plainly:** an offline logout cannot invalidate the
+  server-side session — the `authToken` cookie is httpOnly (script cannot delete it) and the
+  revoking `POST /api/auth/logout` never reached the server — so the session survives
+  server-side until it expires. Everything under the client's control (offline stores, memory,
+  the tab itself) is still torn down unconditionally.
 - **Preserved data must be provably owned, and the readers enforce it themselves**
   (`data-ownership.ts`). The first version of the 401 fix preserved first and settled ownership
   later, from a localStorage note that one cleanup hook consulted — and an audit reached the
@@ -452,8 +469,225 @@ which would otherwise burn a 30 s timeout per locked page on every tick forever.
 Known limitations: a page whose lock is lifted while the tab sits idle is not re-attempted until
 the next reconnect, boot or review; and the manager pushes Yjs content only — a title edited
 offline is still lost, since titles are REST-only (#19's note stands). An outbox for titles
-remains out of scope, as does #21's attachment outbox, which will plug its replay into this same
-manager.
+remains out of scope. #21's attachment outbox is now plugged into this same manager — see the
+next section.
+
+### Attachment upload outbox (issue #21) — Excalidraw & media offline
+
+Phase 4, **opt-in behind the same `docmost.offline-editing` switch and qualitatively riskier
+than phases 1–3** (the issue says so and it is true — read the LWW caveat first). Attachments
+never touch the CRDT: an Excalidraw drawing is one SVG uploaded over REST, a pasted image is a
+REST upload the node then references. So offline attachment work is an *outbox*:
+`upload-outbox.ts`, its own IndexedDB database (`docmost-offline-outbox`, same `NotFoundError`
+reasoning as the sync markers), holding the blob plus enough to replay the upload and repair the
+document afterwards, keyed by **the attachment id the document points at**.
+
+**⚠️ The Excalidraw last-writer-wins caveat, stated plainly.** A diagram is overwritten
+wholesale on save. Replaying an offline save is **last-writer-wins at the file level**: if
+someone else edited the same diagram while you were offline, your replay silently replaces their
+version. There is no merge and no client-side fix; it is inherent to a single-file diagram
+(same class of caveat as `update_page` replace in the MCP write surface). Acceptable for
+single-author pages, dangerous for shared ones — which is a large part of why the feature stays
+behind the default-off switch.
+
+**The pending-URL trick is the whole design.** A queued upload's node carries
+`src = /api/files/<id>/<fileName>` — a *real-shaped* attachment URL whose id is a
+client-generated placeholder UUID for new files (`mode: "create"`), or the real id for an
+existing Excalidraw diagram (`mode: "overwrite"`). The service worker's existing `api-file`
+route consults the outbox **before the network** (`sw/outbox-serving.ts`) and answers those URLs
+from the queued blob. That one decision buys, with **zero changes to any upstream node view**:
+rendering offline; rendering *after reload* (the issue's "re-derive from the outbox blob after
+reload" — an object URL dies with the document, the outbox record does not); rendering online
+before the replay lands (the server would 404); and — for an existing diagram with a queued
+overwrite — **reopen-safety**: `handleOpen` fetches the node's `src`, the worker serves the
+queued blob, so the user edits their latest save instead of clobbering it with edits to the
+stale server copy. Cost, stated plainly: with no service worker (dev server) a pending node is a
+broken image until replay. Real attachments pay one keyed IndexedDB miss per fetch; outbox
+responses are never HTTP- or SW-cached, so a deleted record ends the URL.
+
+**Call sites, kept to one import each** (`offline-uploads.ts` is the barrel, like
+`offline-editing.ts`): both Excalidraw components route their save through
+`saveExcalidrawOrQueue` — online it *is* the upstream `uploadFile` + attrs pair, and it also
+repairs the two queue states it can meet (a placeholder id must never reach the server, so that
+save uploads fresh and deletes the superseded record; a queued overwrite is deleted after a
+direct save of strictly newer content — replaced, not discarded; **a direct save the server
+refuses rethrows and keeps the queued record** — pinned by test). Offline it enqueues; for an
+existing diagram the node keeps its id and path but gets a **fresh `?t=` cache-buster** (review
+gap #3): the img node view re-assigns `el.src` on change, so the in-page preview re-fetches
+through the SW — which matches outbox records by attachment id, never by query string — and
+shows the new drawing immediately instead of after a reload. The attr write is an ordinary
+offline document edit and syncs with everything else on reconnect.
+`handlePaste`/`handleFileDrop` call `queueMediaFilesOffline` at the top of their file branches;
+it answers `false` — do the upstream thing — in every non-queueing session. A **transport**
+failure during an apparently-online save reroutes into the queue (the reachability verdict lags
+the first dropped request of an outage); a server *answer* is always rethrown — converting "the
+server said no" into "it will upload later" would be lying. The attr shapes for all five node
+types live in exactly one module (`pending-media.ts`), transcribed from the upstream upload
+pipeline, and rewrites are **merges** over current attrs so width/align survive.
+
+**Replay rides the #20 manager** (`upload-replay.ts`, called from `runResyncPass` after the page
+loop): same lock, same triggers, same backoff, same two ownership gates, same
+blocked-on-trigger/skip-on-periodic rule. Unlike pages there is **no open-page exclusion** — an
+upload is REST and touches no provider; replaying while the user is on the page is strictly
+better. Blocked vs retry is HTTP-simple: 403/404 → `no-access`, other 4xx → `rejected` (both
+kept and surfaced in the same pill/modal as blocked pages, **with a Download affordance**,
+because the blob is the only copy anywhere); transport/5xx → retry; 401 → retry, because the
+axios interceptor is already running session expiry, which preserves the outbox. A re-save
+racing an in-flight upload is caught by `markUploadUploaded`'s `asOf` check — the newer blob
+stays pending and replays next pass.
+**A TRASHED page is not a refusal, measured rather than assumed** (#42 verification): the
+server's `POST /files/upload` looks the page up with `pageRepo.findById`, which does not filter
+`deletedAt`, and `validateCanEdit` checks membership, restrictions and the fork's lock — not
+trash. So a queued overwrite replayed against a page another account trashed **uploads
+successfully (200)**, settles, and is deleted; the pill's pending count dropping with no
+blocked entry is a *completed* upload, and the bytes are on the trashed page — restore it from
+trash and the offline drawing is there. Verified in a real browser three ways, including with
+the Excalidraw modal open across the reconnect. The blocked path is for genuine refusals —
+locked page and revoked access answer 403, a permanently-deleted page 404 — and was verified
+end to end the same way: record marked `no-access`, kept, listed in the review modal with a
+working Download, zero uncaught errors. The review-modal render path is pinned by
+`resync-indicator.test.tsx` against the exact record shapes a pass produces (`blocked` set,
+`link` absent, `lastPass` without `uploadedFiles`).
+**The queue is published on boot, not only after passes** (review gap #4): a
+reload-while-offline used to show no "N uploads waiting" pill and no blocked list over a
+populated outbox, because enqueue-time publishing died with the previous document and the only
+other publisher — the replay pass — is exactly what cannot run offline. `runResyncPass`'s
+offline early-return now publishes both (after the ownership gate, so a stranger's counts are
+never shown), and the switch turning on reaches the same path through the manager's boot pass.
+**Two uncaught-error sources found by the same verification pass, both fixed:**
+`useCollabToken`'s retry callback (`auth-query.tsx`) read `error.response.status` unguarded,
+and `error.response` is undefined for every transport failure — an uncaught
+`TypeError … (reading 'status') at retry` on the offline/reconnect boundary (reproduced
+byte-for-byte in a real browser; the throw also broke that query's own retry loop). Now
+optional-chained via the exported, tested `collabTokenRetry`. And `excalidraw-menu.tsx`'s
+`handleOpen` opened the modal from its `finally` even when the scene fetch failed (the caught
+error printing as "TypeError: Failed to fetch" from that chunk) — handing the user an **empty
+editable canvas over an existing diagram**, whose next save or 60 s autosave would overwrite
+the real content, queued blob included, with a blank scene. A failed load now refuses to open
+and says so (`notifyDiagramLoadFailed`, kept in the `offline-uploads` barrel so the menu keeps
+its single offline import).
+
+**Rewrites are deferral, never ephemeral providers** — the issue's stated preference, and the
+fork's pin makes it non-negotiable: nothing here constructs a provider session or transforms a
+ydoc outside the editor. A successful `create` upload rewrites the node attrs through the page's
+**live editor**, reached via `pageEditorAtom` (which `page-editor.tsx` already publishes
+upstream — zero new lines there); if the page is not open, the record stays `uploaded` (SW keeps
+rendering it) and `pending-node-rewrite.ts`'s watcher settles it on the next page open in this
+tab. A false "the node is gone" would delete the only renderer of the placeholder URL, so that
+verdict requires the open-page claim, the editor instance's own `storage.pageId`, and a document
+past its initial-empty state (a just-mounted editor holds one empty paragraph until y-indexeddb
+replays — "empty" must read as *not loaded yet*). `overwrite` records are deleted after upload
+even unrewritten: the node already points at the real id, only the `?t=` cache-buster is stale,
+and keeping the record would pin the SW to the local blob forever on a page never reopened here.
+**Every overwrite settlement also purges the SW files cache for that attachment id**
+(`purgeCachedAttachment`, matching by the same `outboxCandidateIdFromPath` rule the worker
+uses): the cache can hold the diagram's *pre-save* bytes under the very URL the node carries,
+and with the record gone an offline reopen would otherwise be handed that stale scene as an
+**editable base**, whose next queued save silently overwrites the user's own newer server
+version. "Broken image until reconnect" is the accepted cost; a stale editable base is not.
+Consequence of deferral, stated plainly: until the uploading device reopens the page, **other
+clients see the placeholder URL as a broken attachment** (their SW has no such record). The
+replay pushes promptly on reconnect, so the window is normally the same as the page resync's.
+The replay also **re-reads each record at upload time** rather than trusting the pass-start
+snapshot: a record deleted mid-pass (the user saved the same diagram directly online) is
+skipped, and a record re-saved mid-pass uploads its fresh blob — replaying a stale snapshot of
+an overwrite could otherwise land *older* bytes as the server's latest.
+
+**Session expiry preserves the outbox under the provable-ownership rules** — the same deliberate
+narrowing as #18's, extended: a queued blob can be the only copy of a drawing, so the 401 path
+preserves the outbox whenever it holds records (or cannot be read — "I cannot tell" preserves,
+never erases) *and* the owner hint + stamp succeed; with no provable owner it is erased with
+everything else, work included. Four things the dirty-registry logic alone would get wrong, all
+pinned by tests: the outbox is consulted **independently** (an Excalidraw re-save queues an
+upload without ever touching the ydoc, so "no dirty pages" ≠ "no pending work"); preserving
+only the outbox still counts as "preserving something" so the owner hint survives; the
+**dirty-page store is preserved whenever anything is** — including outbox-only work — because
+the owner stamp lives *inside* it under a reserved key, and clearing it would stamp the owner
+and then destroy the stamp one call later, leaving preserved blobs unattributable (an
+empty-but-stamped registry is harmless; every listing filters the reserved key out; there is an
+end-to-end test wiring the real store to prove the stamp survives); and **reconcile's unstamped
+branch consults the outbox as well as the dirty registry** — an unstamped disk whose outbox
+holds records is erased exactly like one with dirty pages, since a foreign blob left behind
+would otherwise replay under the next user's cookie or be offered to them as a Download from
+the blocked list. A genuinely fresh browser — both stores empty — still reads as clean and
+never pays. Explicit logout still erases everything, unconditionally. The login-page notice
+carries a **queued-uploads count** alongside its page list (review gap #5): outbox-only
+preservation used to write a notice naming zero pages, which the reader took for "nothing
+preserved" and rendered nothing — precisely for the work whose only copy is the queued blob.
+An unreadable outbox is still preserved but counted as `uploads: 0`, because the notice must
+never claim uploads that may not exist. The replay itself sits
+behind `offlineDataIsOurs()` twice (cached verdict + the stamp beside the records). **Known
+gap, deliberate**: the service worker cannot know who is signed in, so until sign-in reconcile
+erases a foreign outbox it would serve a previous user's blob to a session that requests its
+placeholder URL — reaching one requires knowing that UUID, and rules 1/3 of the ownership
+scheme bound the window exactly as they do for `page.*` documents.
+
+**Excalidraw fonts are self-hosted** (`build/excalidraw-assets-plugin.ts` +
+`excalidraw-assets.ts`): `window.EXCALIDRAW_ASSET_PATH` was never set, so fonts came from a CDN
+and the offline modal fell back to system fonts. The build copies the installed package's
+`dist/prod/fonts` into `dist/excalidraw/**` (build-time copy — no binaries in the repo; resolved
+from the package *main entry*, since its `exports` map hides `package.json`) and `register.ts`
+sets the global — zero upstream-file changes; the dev server falls through to the CDN exactly as
+before. Precache interplay, measured: Latin families (25 files, ~0.5 MB) are `optional` warm-up
+entries; the **12 MB Xiaolai CJK family stays out of the manifest entirely** and is
+runtime-CacheFirst via a new `/excalidraw/` asset route (users who draw CJK get the subsets
+cached on first use); `classifyExcalidrawAsset` keeps every font out of required `core`, whose
+small size gates worker activation. Post-#21 the manifest measures **35 core / 81 optional**
+(the pre-#21 measurements elsewhere in this file — 34 core, warm to 90 — are historic values
+from their build).
+
+**Durable storage** (`durable-storage.ts`): `navigator.storage.persist()` is requested when the
+switch is turned on and on every boot with it on — and **never with it off, a gate enforced
+inside the module** because Firefox answers `persist()` with a user-facing permission prompt
+that a user who never opted in must never see. The verdict is advisory: logged, a one-line note
+in the preference UI on denial, no behaviour change. It protects only against *automatic
+eviction under storage pressure* — clearing site data, private windows and cookie-clearing
+policies still erase everything, and nothing can prevent that.
+
+Known limitations, documented rather than hidden: page **titles** remain REST-only and offline
+title edits are still lost (#19's note stands); draw.io is an external iframe and permanently
+out of scope offline; a blocked upload whose cause is fixed server-side is retried on trigger
+passes only, like blocked pages; an `uploaded` create-record whose page is never reopened in
+this tab keeps its blob on disk indefinitely (logout clears it); pending media inserted
+offline renders no per-node badge — the queued state is announced once via notification and
+surfaced in the standing pill ("N uploads waiting for connection" offline, and the blocked
+list), a deliberate trade against patching four upstream node views; **a queued VIDEO does not
+preview while pending** — browsers fetch `<video>` with a `Range` header, and Range requests
+are passed through untouched (a pre-existing, load-bearing SW invariant: a cached full body
+answered to a Range request, or a cached 206, corrupts playback), so the placeholder URL goes
+to the network and fails until the upload replays; the blob itself is safe and uploads like
+everything else; and **cutting a pending node and pasting it on a different page** leaves the
+record's `pageId` pointing at the original page, so when *that* page next opens the watcher
+reads "node gone" and deletes the record — the pasted copy's placeholder URL stops rendering,
+while the bytes survive server-side (after replay) as an attachment of the original page.
+
+**Upload outbox repro** (add to the offline-editing repro; switch on, page previously synced):
+
+1. Offline, open an existing Excalidraw diagram, draw, **Save & Exit** — the modal closes, a
+   blue "saved on this device" notification appears, and the in-page preview shows the *new*
+   drawing (served by the worker). Reopen the modal offline: it loads the new drawing, not the
+   stale server copy.
+2. Offline, paste an image and drag-drop a PDF: both render immediately and survive a reload
+   while still offline. DevTools → Network shows the `/api/files/<uuid>/...` requests answered
+   by the service worker (`x-docmost-sw-outbox: 1`). A dropped **video** queues but does not
+   preview while pending (Range requests bypass the worker — see the limitations above); it
+   must still upload and resolve on reconnect like the others.
+3. Reconnect: `[docmost] offline uploads: … queued upload(s) to push` in the console, the toast
+   counts files, and the nodes now point at real attachment ids (`select id, file_name from
+   attachments order by created_at desc` grows). The Excalidraw attachment keeps its id.
+4. Lock the page (or permanently delete it) from another account before reconnecting: the pill
+   shows "N items could not sync — review", the review modal lists the file with a working
+   **Download**, and nothing is discarded. Merely **trashing** the page is NOT this case: the
+   server accepts uploads to trashed pages (see the replay notes above), so the queued upload
+   lands, the record settles, and restoring the page from trash shows the offline drawing.
+5. Reload while still offline: the "N uploads waiting for connection" pill reappears from the
+   boot publish (gap #4) — a populated outbox must never be invisible.
+6. Log out while offline with a queued upload: the app must reach the login page (never wedge
+   on a stuck error screen), and all offline stores are erased — the explicit logout wins even
+   with no network (BUG 2). The server-side session survives until expiry; that residue is
+   documented above.
+7. Switch off ⇒ all of it is inert: offline Excalidraw save fails with the modal left open and
+   paste does nothing, exactly as upstream.
 
 ### Detecting offline (`reachability.ts`) — ⚠️ `navigator.onLine` is not it
 

@@ -145,6 +145,7 @@ describe("clearOfflineData", () => {
   let clearPageSyncMarkers: Mock<() => Promise<void>>;
   let clearDirtyPages: Mock<() => Promise<void>>;
   let clearPageSyncMarkersExcept: Mock<(keep: readonly string[]) => Promise<void>>;
+  let clearUploadOutbox: Mock<() => Promise<void>>;
   let forgetOwnerHint: Mock<() => void>;
 
   beforeEach(() => {
@@ -155,6 +156,7 @@ describe("clearOfflineData", () => {
     clearPageSyncMarkersExcept = vi.fn<(keep: readonly string[]) => Promise<void>>(
       async () => {},
     );
+    clearUploadOutbox = vi.fn<() => Promise<void>>(async () => {});
     forgetOwnerHint = vi.fn<() => void>();
   });
 
@@ -169,6 +171,7 @@ describe("clearOfflineData", () => {
       clearPageSyncMarkers,
       clearDirtyPages,
       clearPageSyncMarkersExcept,
+      clearUploadOutbox,
       forgetOwnerHint,
       ...overrides,
     });
@@ -358,6 +361,41 @@ describe("clearOfflineData", () => {
 
     expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
     expect(clearPageSyncMarkers).toHaveBeenCalledOnce();
+    expect(queryClient.clear).toHaveBeenCalledOnce();
+  });
+
+  it("clears the phase-4 upload outbox on logout", async () => {
+    // The outbox holds attachment *bodies* — the previous user's drawings and
+    // pasted files in full — and would feed the next session's replay.
+    await run({ indexedDB: null, caches: null });
+
+    expect(clearUploadOutbox).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the upload outbox when session expiry asks for it", async () => {
+    await run({ indexedDB: null, caches: null, preserveUploadOutbox: true });
+
+    expect(clearUploadOutbox).not.toHaveBeenCalled();
+  });
+
+  it("keeps the owner hint when only the outbox is preserved", async () => {
+    // The blobs are attributable only through the stamp/hint pair; dropping
+    // the hint would make the preserved uploads erasable on the next 401.
+    await run({ indexedDB: null, caches: null, preserveUploadOutbox: true });
+
+    expect(forgetOwnerHint).not.toHaveBeenCalled();
+  });
+
+  it("still erases everything else when the outbox cannot be cleared", async () => {
+    clearUploadOutbox.mockRejectedValue(new Error("blocked"));
+    const queryClient = fakeQueryClient();
+
+    await expect(
+      run({ indexedDB: null, caches: null, queryClient }),
+    ).resolves.toBeUndefined();
+
+    expect(deletePersistedQueryCache).toHaveBeenCalledOnce();
+    expect(clearDirtyPages).toHaveBeenCalledOnce();
     expect(queryClient.clear).toHaveBeenCalledOnce();
   });
 

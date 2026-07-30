@@ -4,6 +4,7 @@ import {
   getOpenPage,
   releaseOpenPage,
   resetOpenPageForTests,
+  subscribeOpenPage,
 } from "./open-page-registry";
 
 describe("open page registry", () => {
@@ -44,5 +45,37 @@ describe("open page registry", () => {
     releaseOpenPage("page-1");
 
     expect(getOpenPage()).toBeNull();
+  });
+
+  it("notifies subscribers on every change of claim, with the new value", () => {
+    const seen: Array<string | null> = [];
+    subscribeOpenPage((pageId) => seen.push(pageId));
+
+    claimOpenPage("page-1");
+    claimOpenPage("page-2");
+    releaseOpenPage("page-2");
+
+    expect(seen).toEqual(["page-1", "page-2", null]);
+  });
+
+  it("does not notify on a redundant claim or a stale release", () => {
+    const seen: Array<string | null> = [];
+    claimOpenPage("page-1");
+    subscribeOpenPage((pageId) => seen.push(pageId));
+
+    claimOpenPage("page-1");
+    releaseOpenPage("page-0");
+
+    expect(seen).toEqual([]);
+  });
+
+  it("stops notifying after unsubscribe", () => {
+    const seen: Array<string | null> = [];
+    const unsubscribe = subscribeOpenPage((pageId) => seen.push(pageId));
+    unsubscribe();
+
+    claimOpenPage("page-1");
+
+    expect(seen).toEqual([]);
   });
 });

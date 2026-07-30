@@ -17,6 +17,10 @@ import {
   ResponsiveSettingsRow,
 } from "@/components/ui/responsive-settings-row";
 import {
+  requestDurableStorage,
+  useDurableStorageVerdict,
+} from "./durable-storage";
+import {
   setOfflineEditingEnabled,
   useOfflineEditingEnabled,
 } from "./offline-editing-settings";
@@ -33,6 +37,7 @@ export default function OfflineEditingPref() {
             "Keep editing pages you have already opened on this device when there is no connection. Changes are saved locally and merge with the server when you reconnect. Page titles still need a connection.",
           )}
         </Text>
+        <DurableStorageNote />
       </ResponsiveSettingsContent>
 
       <ResponsiveSettingsControl>
@@ -49,7 +54,13 @@ export function OfflineEditingToggle() {
   const checked = useOfflineEditingEnabled();
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setOfflineEditingEnabled(event.currentTarget.checked);
+    const enabled = event.currentTarget.checked;
+    setOfflineEditingEnabled(enabled);
+    // Turning the feature on is the moment the disk starts holding the only
+    // copy of work, so it is the moment to ask the browser not to evict it.
+    // Never called with the switch off — Firefox shows a permission prompt —
+    // and the module itself enforces that gate too (durable-storage.ts).
+    if (enabled) void requestDurableStorage();
   };
 
   return (
@@ -59,5 +70,26 @@ export function OfflineEditingToggle() {
       onChange={handleChange}
       aria-label={t("Toggle offline page editing")}
     />
+  );
+}
+
+/**
+ * The quiet denial note. Advisory only: the feature works the same on
+ * best-effort storage — the browser is just allowed to evict it under disk
+ * pressure — and a denial is worth a sentence here, not a modal.
+ */
+function DurableStorageNote() {
+  const { t } = useTranslation();
+  const enabled = useOfflineEditingEnabled();
+  const verdict = useDurableStorageVerdict();
+
+  if (!enabled || verdict !== "denied") return null;
+
+  return (
+    <Text size="xs" c="dimmed">
+      {t(
+        "Your browser declined persistent storage, so offline changes could be evicted if the device runs low on disk space.",
+      )}
+    </Text>
   );
 }

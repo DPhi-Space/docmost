@@ -3,6 +3,7 @@ import {
   BundleEntryInfo,
   OPTIONAL_MODULE_MARKERS,
   buildPrecacheManifest,
+  classifyExcalidrawAsset,
   isPrecachableFile,
   isPublicPrecachableFile,
   unmatchedOptionalMarkers,
@@ -67,6 +68,10 @@ const realisticBundle: BundleEntryInfo[] = [
   asset("assets/KaTeX_Main-Regular-B22Nviop.woff2"),
   asset("assets/KaTeX_Main-Regular-Dr94JaBh.woff"),
   asset("assets/KaTeX_Main-Regular-ypZvNtVU.ttf"),
+  // Self-hosted Excalidraw fonts (excalidraw-assets-plugin.ts).
+  asset("excalidraw/fonts/Excalifont/Excalifont-Regular-a88b.woff2"),
+  asset("excalidraw/fonts/Virgil/Virgil-Regular.woff2"),
+  asset("excalidraw/fonts/Xiaolai/Xiaolai-Regular-019d.woff2"),
 ];
 
 const publicFiles = [
@@ -209,6 +214,53 @@ describe("buildPrecacheManifest", () => {
 
   it("tolerates an empty bundle", () => {
     expect(buildPrecacheManifest([], [])).toEqual({ core: [], optional: [] });
+  });
+
+  it("keeps every self-hosted Excalidraw font out of the required core set", () => {
+    // The fonts are woff2, and the woff2 rule sweeping ~13 MB of them into
+    // `core` would break the small-required-set property that gates worker
+    // activation on flaky networks.
+    expect(
+      manifest.core.filter((url) => url.startsWith("/excalidraw/")),
+    ).toEqual([]);
+  });
+
+  it("warms the Latin Excalidraw fonts as optional entries", () => {
+    expect(manifest.optional).toContain(
+      "/excalidraw/fonts/Excalifont/Excalifont-Regular-a88b.woff2",
+    );
+    expect(manifest.optional).toContain(
+      "/excalidraw/fonts/Virgil/Virgil-Regular.woff2",
+    );
+  });
+
+  it("leaves the 12 MB Xiaolai CJK family to the runtime cache", () => {
+    const all = [...manifest.core, ...manifest.optional];
+    expect(
+      all.filter((url) => url.startsWith("/excalidraw/fonts/Xiaolai/")),
+    ).toEqual([]);
+  });
+});
+
+describe("classifyExcalidrawAsset", () => {
+  it("classifies only the excalidraw asset tree", () => {
+    expect(classifyExcalidrawAsset("assets/index-abc.js")).toBeNull();
+    expect(classifyExcalidrawAsset("icons/favicon.png")).toBeNull();
+  });
+
+  it("marks Latin families optional and Xiaolai runtime-only", () => {
+    expect(
+      classifyExcalidrawAsset("excalidraw/fonts/Virgil/Virgil-Regular.woff2"),
+    ).toBe("optional");
+    expect(
+      classifyExcalidrawAsset("excalidraw/fonts/Xiaolai/Xiaolai-Regular-1.woff2"),
+    ).toBe("runtime-only");
+  });
+
+  it("never lets an HTML file into the precache, even under excalidraw/", () => {
+    expect(classifyExcalidrawAsset("excalidraw/fonts/oops.html")).toBe(
+      "runtime-only",
+    );
   });
 });
 

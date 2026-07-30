@@ -69,6 +69,14 @@ import {
   type ResyncPageDeps,
 } from "./resync-page";
 import { setResyncState } from "./resync-state";
+import {
+  EMPTY_UPLOAD_SUMMARY,
+  createDefaultUploadReplayDeps,
+  publishUploadState,
+  replayUploadPass,
+  type UploadReplaySummary,
+} from "./upload-replay";
+import { listUploadRecords, type UploadOutboxRecord } from "./upload-outbox";
 
 /** The Web Locks name; shared by every tab of this origin. */
 export const RESYNC_LOCK_NAME = "docmost-offline-resync";
@@ -107,6 +115,8 @@ export interface ResyncPassSummary {
   deferred: number;
   /** Another tab held the lock; nothing was attempted here. */
   skipped: boolean;
+  /** Phase 4: the upload-outbox half of the pass. */
+  uploads: UploadReplaySummary;
 }
 
 export interface ResyncManagerDeps {
@@ -136,6 +146,17 @@ export interface ResyncManagerDeps {
   subscribeOwnership: (listener: () => void) => () => void;
   /** The owner stamp, read from the same store as the work it describes. */
   readOfflineDataOwner: () => Promise<OfflineDataOwner>;
+  /**
+   * Phase 4: replay the upload outbox. Runs inside the same lock and behind
+   * the same ownership gates as the page loop, after it — the pages carry the
+   * document structure the uploads' node rewrites are aimed at.
+   * `includeBlocked` follows the same trigger rule as the pages.
+   */
+  replayUploads: (includeBlocked: boolean) => Promise<UploadReplaySummary>;
+  /** The outbox contents, for publishing state when no pass can run. */
+  listUploadRecords: typeof listUploadRecords;
+  /** Publishes the outbox-derived slice of the pill's state. */
+  publishUploadRecords: (records: readonly UploadOutboxRecord[]) => void;
   /** The identity the current ownership verdict was reached for. */
   currentUserId: () => string | null;
   now: () => number;
@@ -170,6 +191,7 @@ export async function runResyncPass(
     blocked: 0,
     deferred: 0,
     skipped: false,
+    uploads: EMPTY_UPLOAD_SUMMARY,
   };
 
   // Ownership before anything else. Pushing a document this browser cannot
@@ -177,7 +199,21 @@ export async function runResyncPass(
   // the server under the current user's identity — the worst half of the leak
   // this guards. `false` until reconciliation says otherwise.
   if (!deps.offlineDataIsOurs()) return empty;
-  if (!deps.isEnabled() || !deps.isOnline()) return empty;
+  if (!deps.isEnabled()) return empty;
+  if (!deps.isOnline()) {
+    /**
+     * No pass can run, but the standing UI must still reflect the queue.
+     * After a reload-while-offline nothing else ever publishes: enqueue-time
+     * publishing happened in the previous document, and the replay pass — the
+     * only other publisher — is exactly what cannot run here. Without this,
+     * the "N uploads waiting for connection" pill and the blocked list stayed
+     * empty over a populated outbox until the first online pass (gap #4 of
+     * the #21 review). Ownership is already settled above, so this discloses
+     * nothing that is not the signed-in user's.
+     */
+    await publishQueuedWork(deps);
+    return empty;
+  }
 
   const result = await deps.withLock(RESYNC_LOCK_NAME, async () => {
     /**
@@ -198,62 +234,78 @@ export async function runResyncPass(
       return empty;
     }
 
+    // The periodic timer is the only trigger that is not a change of
+    // circumstances, and the only one for which retrying a locked page (or a
+    // refused upload) would just burn its timeout again.
+    const includeBlocked = trigger !== "periodic";
+
     const records = await deps.listDirtyPages();
     const pages = selectPagesToResync(records, {
       openPageId: deps.getOpenPage(),
-      // The periodic timer is the only trigger that is not a change of
-      // circumstances, and the only one for which retrying a locked page
-      // would just burn its timeout again.
-      includeBlocked: trigger !== "periodic",
+      includeBlocked,
     });
 
-    // The blocked list is published unconditionally after the lock is
-    // released, so nothing more is owed here.
-    if (pages.length === 0) return empty;
-
-    deps.log(
-      `offline resync: ${pages.length} page(s) to push (${trigger})`,
-      pages.map((page) => page.pageId),
-    );
-
     const summary: ResyncPassSummary = { ...empty, attempted: pages.length };
-    deps.publish({ phase: "syncing", total: pages.length, completed: 0 });
 
-    for (const page of pages) {
-      // Re-checked every page: connectivity can die mid-pass, and stopping
-      // early is what keeps the failure a deferral rather than a wall of
-      // 30-second timeouts.
-      if (!deps.isOnline()) {
-        // Assigned, not accumulated: pages already deferred one at a time are
-        // part of the same remainder.
-        summary.deferred = pages.length - summary.synced - summary.blocked;
-        break;
-      }
+    if (pages.length > 0) {
+      deps.log(
+        `offline resync: ${pages.length} page(s) to push (${trigger})`,
+        pages.map((page) => page.pageId),
+      );
 
-      const outcome = await deps.resyncOnePage(page.pageId);
-      switch (outcome.status) {
-        case "synced":
-          await deps.clearDirtyPage(page.pageId);
-          summary.synced += 1;
+      deps.publish({ phase: "syncing", total: pages.length, completed: 0 });
+
+      for (const page of pages) {
+        // Re-checked every page: connectivity can die mid-pass, and stopping
+        // early is what keeps the failure a deferral rather than a wall of
+        // 30-second timeouts.
+        if (!deps.isOnline()) {
+          // Assigned, not accumulated: pages already deferred one at a time
+          // are part of the same remainder.
+          summary.deferred = pages.length - summary.synced - summary.blocked;
           break;
-        case "blocked":
-          await deps.markDirtyPageBlocked(page.pageId, outcome.reason);
-          summary.blocked += 1;
-          deps.log(
-            `offline resync: ${page.pageId} refused by the server`,
-            outcome.reason,
-          );
-          break;
-        default:
-          // `retry` and `aborted` both leave the entry exactly as it was.
-          summary.deferred += 1;
-          deps.log(
-            `offline resync: ${page.pageId} deferred`,
-            outcome.status === "retry" ? outcome.reason : outcome.status,
-          );
-          break;
+        }
+
+        const outcome = await deps.resyncOnePage(page.pageId);
+        switch (outcome.status) {
+          case "synced":
+            await deps.clearDirtyPage(page.pageId);
+            summary.synced += 1;
+            break;
+          case "blocked":
+            await deps.markDirtyPageBlocked(page.pageId, outcome.reason);
+            summary.blocked += 1;
+            deps.log(
+              `offline resync: ${page.pageId} refused by the server`,
+              outcome.reason,
+            );
+            break;
+          default:
+            // `retry` and `aborted` both leave the entry exactly as it was.
+            summary.deferred += 1;
+            deps.log(
+              `offline resync: ${page.pageId} deferred`,
+              outcome.status === "retry" ? outcome.reason : outcome.status,
+            );
+            break;
+        }
+        deps.publish({
+          completed: summary.synced + summary.blocked + summary.deferred,
+        });
       }
-      deps.publish({ completed: summary.synced + summary.blocked + summary.deferred });
+    }
+
+    /**
+     * Phase 4: uploads after pages, under the same lock. After, because the
+     * page loop pushes the document structure whose nodes the uploads' attr
+     * rewrites are aimed at; and inside the lock so two tabs can never replay
+     * the same blob concurrently. A failure here must not cost the page half
+     * of the pass its summary.
+     */
+    try {
+      summary.uploads = await deps.replayUploads(includeBlocked);
+    } catch (error) {
+      deps.log("offline uploads: replay failed", error);
     }
 
     return summary;
@@ -271,8 +323,13 @@ export async function runResyncPass(
     total: 0,
     completed: 0,
     lastPass:
-      result.synced > 0 || result.blocked > 0
-        ? { at: deps.now(), synced: result.synced, blocked: result.blocked }
+      result.synced > 0 || result.blocked > 0 || result.uploads.uploaded > 0
+        ? {
+            at: deps.now(),
+            synced: result.synced,
+            blocked: result.blocked,
+            uploadedFiles: result.uploads.uploaded,
+          }
         : null,
   });
   return result;
@@ -282,6 +339,16 @@ async function publishBlocked(deps: ResyncManagerDeps): Promise<void> {
   deps.publish({ blocked: blockedPages(await deps.listDirtyPages()) });
 }
 
+/** Blocked pages + outbox counts, for sessions where no pass can run. */
+async function publishQueuedWork(deps: ResyncManagerDeps): Promise<void> {
+  try {
+    await publishBlocked(deps);
+    deps.publishUploadRecords(await deps.listUploadRecords());
+  } catch {
+    // Presentation only; the stores themselves are untouched.
+  }
+}
+
 /**
  * A pass is "incomplete" when something is still owed: pages deferred by a
  * transport failure, or a tab that could not take the lock. Pages the server
@@ -289,7 +356,9 @@ async function publishBlocked(deps: ResyncManagerDeps): Promise<void> {
  * UI, and retrying them on a backoff schedule would be a treadmill.
  */
 export function isPassIncomplete(summary: ResyncPassSummary): boolean {
-  return summary.skipped || summary.deferred > 0;
+  return (
+    summary.skipped || summary.deferred > 0 || summary.uploads.deferred > 0
+  );
 }
 
 export interface ResyncManager {
@@ -469,6 +538,14 @@ export function createDefaultResyncDeps(): ResyncManagerDeps {
     resyncOnePage: (pageId) => resyncPage(pageId, perPageDeps()),
     /** Exposed for the wiring test; not part of `ResyncManagerDeps`. */
     perPageDeps,
+    replayUploads: (includeBlocked) =>
+      replayUploadPass(includeBlocked, {
+        ...createDefaultUploadReplayDeps(),
+        // The same mid-pass connectivity check the page loop uses.
+        isOnline: isServerReachable,
+      }),
+    listUploadRecords,
+    publishUploadRecords: publishUploadState,
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
     isOnline: isServerReachable,
