@@ -30,6 +30,7 @@ import { useTranslation } from "react-i18next";
 import { isCloud } from "@/lib/config.ts";
 import { exchangeTokenRedirectUrl, getHostnameUrl } from "@/ee/utils.ts";
 import { clearOfflineData } from "@/features/offline/clear-offline-data";
+import { performLogoutExit } from "@/features/offline/logout-exit";
 
 export default function useAuth() {
   const { t } = useTranslation();
@@ -168,13 +169,22 @@ export default function useAuth() {
 
   const handleLogout = async () => {
     setCurrentUser(RESET);
-    await logout();
     // The user is done with this machine, so everything goes — including
     // offline edits that were never pushed. Unlike the 401 path
     // (`session-expiry.ts`), which keeps them, this is the shared-machine exit
     // #18 made non-optional. Do not soften it here.
-    await clearOfflineData({ queryClient });
-    window.location.replace(`${APP_ROUTE.AUTH.LOGIN}?logout=1`);
+    //
+    // The server call inside is best-effort: a logout clicked while offline
+    // must still erase this device and reach the login page (BUG: it used to
+    // wedge the app on a transport failure). See `logout-exit.ts` for the
+    // ordering guarantees and the server-side-session residue this leaves.
+    await performLogoutExit({
+      serverLogout: logout,
+      clearOfflineData: () => clearOfflineData({ queryClient }),
+      navigateToLogin: () =>
+        window.location.replace(`${APP_ROUTE.AUTH.LOGIN}?logout=1`),
+      log: (message, detail) => console.warn(`[docmost] ${message}`, detail),
+    });
   };
 
   const handleForgotPassword = async (data: IForgotPassword) => {
