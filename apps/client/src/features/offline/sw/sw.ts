@@ -28,6 +28,11 @@ import {
   keysToEvict,
 } from "./cache-policy";
 import { RouteKind, resolveRoute } from "./routes";
+import {
+  outboxCandidateIdFromPath,
+  outboxResponseHeaders,
+} from "./outbox-serving";
+import { readUploadRecord } from "../upload-outbox";
 import type { PrecacheManifest } from "../build/precache-manifest";
 
 /** Injected at build time by the service-worker plugin. */
@@ -369,6 +374,31 @@ async function handleApiFile(
   request: Request,
   extendLifetime: ExtendLifetime,
 ): Promise<Response> {
+  // Upload outbox first (phase 4): a queued upload's node points at a URL the
+  // server does not know yet — or, for a queued Excalidraw overwrite, one the
+  // server would answer with the *stale previous version*. The outbox blob is
+  // the truth for these ids until the replay lands and the record is deleted;
+  // see `outbox-serving.ts`. Everything else misses this lookup and proceeds
+  // exactly as before. Never cached: the record's deletion must be the end of
+  // the URL.
+  try {
+    const candidateId = outboxCandidateIdFromPath(
+      new URL(request.url, sw.location.origin).pathname,
+    );
+    if (candidateId) {
+      const record = await readUploadRecord(candidateId);
+      if (record) {
+        return new Response(record.blob, {
+          status: 200,
+          headers: outboxResponseHeaders(record),
+        });
+      }
+    }
+  } catch {
+    // An unreadable outbox must degrade to normal file handling, not break
+    // every attachment fetch.
+  }
+
   const cache = await caches.open(NAMES.files);
   try {
     const response = await fetchWithTimeout(request, FILE_TIMEOUT_MS);
