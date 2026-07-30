@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import * as path from "path";
+import { excalidrawAssetsPlugin } from "./src/features/offline/build/excalidraw-assets-plugin";
 import { serviceWorkerPlugin } from "./src/features/offline/build/service-worker-plugin";
 
 const envPath = path.resolve(process.cwd(), "..", "..");
@@ -37,6 +38,10 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [
       react(),
+      // Copies @excalidraw/excalidraw's fonts into dist/excalidraw/** so the
+      // modal works offline; must precede the SW plugin so its generateBundle
+      // classification sees them. See features/offline/build.
+      excalidrawAssetsPlugin(),
       // Emits dist/sw.js (offline app shell). See features/offline/build.
       serviceWorkerPlugin({ version: process.env.npm_package_version }),
     ],
