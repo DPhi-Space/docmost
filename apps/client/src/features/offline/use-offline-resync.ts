@@ -26,6 +26,7 @@ import { getMyInfo } from "@/features/user/services/user-service";
 import { reconcileOfflineDataOwnership } from "./data-ownership";
 import { setDirtyPageLinkResolver } from "./dirty-page-link";
 import { setOfflineDataOwner } from "./dirty-pages";
+import { startPendingRewriteWatcher } from "./pending-node-rewrite";
 import { whenServerReachable } from "./reachability";
 import { createResyncManager, type ResyncManager } from "./resync-manager";
 import { resetResyncState } from "./resync-state";
@@ -180,6 +181,8 @@ export function useOfflineDataOwnership(): void {
  * would fight over the shared state store.
  */
 let manager: ResyncManager | null = null;
+/** Phase 4's deferred node-attr rewrites; lives and dies with the manager. */
+let rewriteWatcher: (() => void) | null = null;
 let refCount = 0;
 
 /**
@@ -203,11 +206,14 @@ export function useOfflineResync(enabled: boolean): void {
     if (!enabled) return;
     refCount += 1;
     manager ??= createResyncManager();
+    rewriteWatcher ??= startPendingRewriteWatcher();
     return () => {
       refCount -= 1;
       if (refCount > 0) return;
       manager?.stop();
       manager = null;
+      rewriteWatcher?.();
+      rewriteWatcher = null;
       resetResyncState();
     };
   }, [enabled]);

@@ -39,15 +39,13 @@ import {
   pendingNodeAttrs,
   probeImageDimensions,
 } from "./pending-media";
-import { setResyncState } from "./resync-state";
+import { publishUploadState } from "./upload-replay";
 import {
-  blockedUploads,
   deleteUploadRecord,
   enqueueUpload,
   listUploadRecords,
   newPlaceholderAttachmentId,
   readUploadRecord,
-  type UploadOutboxRecord,
 } from "./upload-outbox";
 import {
   classifyUploadFailure,
@@ -100,12 +98,7 @@ function notifyQueued(message: string): void {
 
 /** Recount the outbox for the pill; best-effort, never awaited by callers. */
 export async function publishUploadOutboxState(): Promise<void> {
-  const records = await listUploadRecords();
-  setResyncState({
-    pendingUploads: records.filter((record) => record.status === "pending")
-      .length,
-    blockedUploads: blockedUploads(records),
-  });
+  publishUploadState(await listUploadRecords());
 }
 
 /**

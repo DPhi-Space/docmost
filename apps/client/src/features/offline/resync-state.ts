@@ -22,6 +22,8 @@ export interface ResyncPassResult {
   synced: number;
   /** Pages the server refused in this pass. */
   blocked: number;
+  /** Phase 4: queued uploads pushed to the server in this pass. */
+  uploadedFiles?: number;
 }
 
 export interface ResyncState {
