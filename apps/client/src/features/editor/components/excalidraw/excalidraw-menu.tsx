@@ -28,11 +28,10 @@ import {
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import { getFileUrl } from "@/lib/config.ts";
-import { uploadFile } from "@/features/page/services/page-service.ts";
+import { saveExcalidrawOrQueue } from "@/features/offline/offline-uploads";
 import { svgStringToFile } from "@/lib";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { IAttachment } from "@/features/attachments/types/attachment.types";
 import ReactClearModal from "react-clear-modal";
 import { useHandleLibrary } from "@excalidraw/excalidraw";
 import { localStorageLibraryAdapter } from "@/features/editor/components/excalidraw/excalidraw-utils.ts";
@@ -224,19 +223,15 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
       const pageId = editor.storage?.pageId;
       const attachmentId = editorState?.attachmentId;
 
-      let attachment: IAttachment = null;
-      if (attachmentId) {
-        attachment = await uploadFile(excalidrawSvgFile, pageId, attachmentId);
-      } else {
-        attachment = await uploadFile(excalidrawSvgFile, pageId);
-      }
-
-      editor.commands.updateAttributes("excalidraw", {
-        src: `/api/files/${attachment.id}/${attachment.fileName}?t=${new Date(attachment.updatedAt).getTime()}`,
-        title: attachment.fileName,
-        size: attachment.fileSize,
-        attachmentId: attachment.id,
+      const saved = await saveExcalidrawOrQueue({
+        file: excalidrawSvgFile,
+        pageId,
+        attachmentId,
       });
+
+      if (saved.attrs) {
+        editor.commands.updateAttributes("excalidraw", saved.attrs);
+      }
 
       isDirtyRef.current = false;
     } finally {
