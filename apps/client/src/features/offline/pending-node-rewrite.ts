@@ -129,10 +129,24 @@ export function rewritePendingNode(
       found = true;
       // Descending positions so earlier rewrites cannot shift later targets.
       for (const target of targets.sort((a, b) => b.pos - a.pos)) {
-        tr.setNodeMarkup(target.pos, undefined, {
+        const next: Record<string, unknown> = {
           ...target.attrs,
           ...uploadedNodeAttrs(record.nodeType, uploaded),
-        });
+        };
+        /**
+         * An Excalidraw node with no `src` is one the user has created but
+         * never explicitly saved — the modal's 30 s autosave uploads content
+         * and records only the attachment id, and the node keeps rendering as
+         * the "double-click to edit" card until Save & Exit sets `src`
+         * (upstream's `updateSrc=false` path). Introducing `src` here would
+         * flip the node into its image view, which recreates the node view —
+         * and if the modal is open mid-draw, tears it down. Rewrite the id
+         * and leave `src` in whatever state the user's actions put it.
+         */
+        if (record.nodeType === "excalidraw" && !target.attrs.src) {
+          delete next.src;
+        }
+        tr.setNodeMarkup(target.pos, undefined, next);
       }
       return true;
     });
