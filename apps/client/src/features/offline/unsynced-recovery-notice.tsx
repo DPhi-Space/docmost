@@ -43,6 +43,17 @@ export function UnsyncedRecoveryNotice() {
         {notice.pages.map((page) => (
           <List.Item key={page.pageId}>{page.title || t("Untitled")}</List.Item>
         ))}
+        {/* Outbox-only work (an Excalidraw re-save, a pasted image) preserves
+            no page entry, so the queued uploads are named on their own line —
+            without it the notice rendered nothing for exactly the work whose
+            only copy is the queued blob (gap #5 of the #21 review). */}
+        {(notice.uploads ?? 0) > 0 && (
+          <List.Item key="queued-uploads">
+            {notice.uploads === 1
+              ? t("1 queued file upload")
+              : t("{{count}} queued file uploads", { count: notice.uploads })}
+          </List.Item>
+        )}
       </List>
     </Alert>
   );

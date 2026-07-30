@@ -72,9 +72,11 @@ import { setResyncState } from "./resync-state";
 import {
   EMPTY_UPLOAD_SUMMARY,
   createDefaultUploadReplayDeps,
+  publishUploadState,
   replayUploadPass,
   type UploadReplaySummary,
 } from "./upload-replay";
+import { listUploadRecords, type UploadOutboxRecord } from "./upload-outbox";
 
 /** The Web Locks name; shared by every tab of this origin. */
 export const RESYNC_LOCK_NAME = "docmost-offline-resync";
@@ -151,6 +153,10 @@ export interface ResyncManagerDeps {
    * `includeBlocked` follows the same trigger rule as the pages.
    */
   replayUploads: (includeBlocked: boolean) => Promise<UploadReplaySummary>;
+  /** The outbox contents, for publishing state when no pass can run. */
+  listUploadRecords: typeof listUploadRecords;
+  /** Publishes the outbox-derived slice of the pill's state. */
+  publishUploadRecords: (records: readonly UploadOutboxRecord[]) => void;
   /** The identity the current ownership verdict was reached for. */
   currentUserId: () => string | null;
   now: () => number;
@@ -193,7 +199,21 @@ export async function runResyncPass(
   // the server under the current user's identity — the worst half of the leak
   // this guards. `false` until reconciliation says otherwise.
   if (!deps.offlineDataIsOurs()) return empty;
-  if (!deps.isEnabled() || !deps.isOnline()) return empty;
+  if (!deps.isEnabled()) return empty;
+  if (!deps.isOnline()) {
+    /**
+     * No pass can run, but the standing UI must still reflect the queue.
+     * After a reload-while-offline nothing else ever publishes: enqueue-time
+     * publishing happened in the previous document, and the replay pass — the
+     * only other publisher — is exactly what cannot run here. Without this,
+     * the "N uploads waiting for connection" pill and the blocked list stayed
+     * empty over a populated outbox until the first online pass (gap #4 of
+     * the #21 review). Ownership is already settled above, so this discloses
+     * nothing that is not the signed-in user's.
+     */
+    await publishQueuedWork(deps);
+    return empty;
+  }
 
   const result = await deps.withLock(RESYNC_LOCK_NAME, async () => {
     /**
@@ -317,6 +337,16 @@ export async function runResyncPass(
 
 async function publishBlocked(deps: ResyncManagerDeps): Promise<void> {
   deps.publish({ blocked: blockedPages(await deps.listDirtyPages()) });
+}
+
+/** Blocked pages + outbox counts, for sessions where no pass can run. */
+async function publishQueuedWork(deps: ResyncManagerDeps): Promise<void> {
+  try {
+    await publishBlocked(deps);
+    deps.publishUploadRecords(await deps.listUploadRecords());
+  } catch {
+    // Presentation only; the stores themselves are untouched.
+  }
 }
 
 /**
@@ -514,6 +544,8 @@ export function createDefaultResyncDeps(): ResyncManagerDeps {
         // The same mid-pass connectivity check the page loop uses.
         isOnline: isServerReachable,
       }),
+    listUploadRecords,
+    publishUploadRecords: publishUploadState,
     withLock: withWebLock,
     isEnabled: isOfflineEditingEnabled,
     isOnline: isServerReachable,
