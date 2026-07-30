@@ -15,12 +15,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { uploadFile } from "@/features/page/services/page-service.ts";
+import { saveExcalidrawOrQueue } from "@/features/offline/offline-uploads";
 import { svgStringToFile } from "@/lib";
 import { useDisclosure } from "@mantine/hooks";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { IAttachment } from "@/features/attachments/types/attachment.types";
 import ReactClearModal from "react-clear-modal";
 import clsx from "clsx";
 import { IconEdit } from "@tabler/icons-react";
@@ -99,24 +98,16 @@ export default function ExcalidrawView(props: NodeViewProps) {
       // @ts-ignore
       const pageId = editor.storage?.pageId;
 
-      let attachment: IAttachment = null;
-      if (attachmentId) {
-        attachment = await uploadFile(excalidrawSvgFile, pageId, attachmentId);
-      } else {
-        attachment = await uploadFile(excalidrawSvgFile, pageId);
-      }
+      const saved = await saveExcalidrawOrQueue({
+        file: excalidrawSvgFile,
+        pageId,
+        attachmentId,
+      });
 
-      if (updateSrc) {
-        updateAttributes({
-          src: `/api/files/${attachment.id}/${attachment.fileName}?t=${new Date(attachment.updatedAt).getTime()}`,
-          title: attachment.fileName,
-          size: attachment.fileSize,
-          attachmentId: attachment.id,
-        });
-      } else {
-        updateAttributes({
-          attachmentId: attachment.id,
-        });
+      if (saved.attrs) {
+        updateAttributes(
+          updateSrc ? saved.attrs : { attachmentId: saved.attrs.attachmentId },
+        );
       }
 
       isDirtyRef.current = false;
