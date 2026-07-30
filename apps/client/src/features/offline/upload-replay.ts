@@ -35,12 +35,17 @@
  *   `?t=` cache-buster is stale. Try the live rewrite once, then delete the
  *   record either way — keeping it would pin the service worker to the local
  *   blob on a page the user may never reopen in this tab, hiding any *newer*
- *   server version from them indefinitely.
+ *   server version from them indefinitely. Deleting is paired with purging
+ *   the SW files cache for that attachment id, so an offline reopen can never
+ *   be handed the pre-save bytes as an editable base (see
+ *   {@link purgeCachedAttachment}).
  */
 
 import { uploadFile } from "@/features/page/services/page-service.ts";
 import type { IAttachment } from "@/features/attachments/types/attachment.types";
 import { attemptPendingRewrite, type RewriteOutcome } from "./pending-node-rewrite";
+import { FILES_CACHE_NAME } from "./sw/cache-policy";
+import { outboxCandidateIdFromPath } from "./sw/outbox-serving";
 import { setResyncState } from "./resync-state";
 import {
   classifyUploadFailure,
@@ -92,6 +97,12 @@ export interface UploadReplayDeps {
     attachmentId?: string,
   ) => Promise<UploadedAttachmentInfo>;
   attemptRewrite: (record: UploadOutboxRecord) => RewriteOutcome;
+  /**
+   * Drop every SW-cached body for this attachment id. Called whenever an
+   * `overwrite` record is deleted after its upload landed — see
+   * {@link purgeCachedAttachment} for the data-loss path this closes.
+   */
+  purgeCachedFile: (attachmentId: string) => Promise<void>;
   /** Re-checked between uploads, exactly like the page loop. */
   isOnline: () => boolean;
   publish: (records: readonly UploadOutboxRecord[]) => void;
@@ -121,6 +132,61 @@ async function uploadedInfoFromAttachment(
   };
 }
 
+/** The slice of `CacheStorage` the purge uses; structural for tests. */
+export interface CacheStorageLike {
+  open(name: string): Promise<{
+    keys(): Promise<ReadonlyArray<{ url: string }>>;
+    delete(request: { url: string }): Promise<boolean>;
+  }>;
+}
+
+/**
+ * Remove every `files` runtime-cache entry for an attachment id.
+ *
+ * ## The data-loss path this closes (review finding F3)
+ *
+ * View a diagram online (the SW's NetworkFirst files route caches its bytes
+ * under the node's `src`, `?t=old`) → save it offline (queued overwrite) →
+ * reconnect with the page closed → the replay uploads and deletes the record
+ * with no rewrite, so the node keeps `?t=old` → go offline again and open the
+ * modal. The outbox now misses, the network fails, and the cache fallback
+ * serves the **pre-save bytes** — a stale scene offered for *editing*, whose
+ * next queued save replays over the user's own newer server version. Purging
+ * the id's entries when the record is deleted turns that into "broken image
+ * until reconnect", which is survivable; a stale editable base is not. The
+ * next online view re-caches fresh bytes as usual.
+ *
+ * Window and worker share one origin-scoped Cache Storage, so this runs fine
+ * from the replay loop's context. Matching reuses `outboxCandidateIdFromPath`
+ * so the id-extraction rule cannot drift from the worker's, and matches every
+ * variant of the URL regardless of query string.
+ */
+export async function purgeCachedAttachment(
+  attachmentId: string,
+  cacheStorage: CacheStorageLike | null = (globalThis.caches as
+    | CacheStorageLike
+    | undefined) ?? null,
+): Promise<void> {
+  try {
+    if (!cacheStorage) return;
+    const cache = await cacheStorage.open(FILES_CACHE_NAME);
+    for (const request of await cache.keys()) {
+      let pathname: string;
+      try {
+        pathname = new URL(request.url).pathname;
+      } catch {
+        continue;
+      }
+      if (outboxCandidateIdFromPath(pathname) === attachmentId) {
+        await cache.delete(request);
+      }
+    }
+  } catch {
+    // Best effort: an unpurged entry recreates the pre-existing staleness
+    // window, it does not corrupt anything new.
+  }
+}
+
 export function createDefaultUploadReplayDeps(): UploadReplayDeps {
   return {
     listUploadRecords,
@@ -132,6 +198,7 @@ export function createDefaultUploadReplayDeps(): UploadReplayDeps {
     upload: async (file, pageId, attachmentId) =>
       uploadedInfoFromAttachment(await uploadFile(file, pageId, attachmentId)),
     attemptRewrite: attemptPendingRewrite,
+    purgeCachedFile: (attachmentId) => purgeCachedAttachment(attachmentId),
     isOnline: () => true, // replaced by the manager wiring's reachability check
     publish: publishUploadState,
     log: (message, detail) => {
@@ -184,7 +251,10 @@ export async function replayUploadPass(
     }
 
     const outcome = await replayOneUpload(record, deps);
-    summary[outcome] += 1;
+    // `skipped` records vanished or were settled by other means since the
+    // pass-start snapshot; they are neither success nor failure and must not
+    // feed the backoff.
+    if (outcome !== "skipped") summary[outcome] += 1;
   }
 
   try {
@@ -196,9 +266,23 @@ export async function replayUploadPass(
 }
 
 async function replayOneUpload(
-  record: UploadOutboxRecord,
+  snapshot: UploadOutboxRecord,
   deps: UploadReplayDeps,
-): Promise<"uploaded" | "blocked" | "deferred"> {
+): Promise<"uploaded" | "blocked" | "deferred" | "skipped"> {
+  /**
+   * Re-read at upload time, never trust the pass-start snapshot (review
+   * finding F5). The snapshot can be minutes stale behind serial uploads and
+   * the page loop's timeouts, and two things can happen to a record in that
+   * window: it is *deleted* — the user saved the same diagram directly online
+   * and `saveExcalidrawOrQueue` withdrew it, so uploading the snapshot's blob
+   * would replay OLD bytes over their newer server version; or it is
+   * *re-saved* — the snapshot's blob is superseded and the fresh one is what
+   * must be pushed. Re-reading shrinks the race from minutes to the
+   * milliseconds of one IndexedDB round trip.
+   */
+  const record = await deps.readUploadRecord(snapshot.attachmentId);
+  if (!record || record.status !== "pending") return "skipped";
+
   const asOf = record.updatedAt;
   const file = new File([record.blob], record.fileName, {
     type: record.mimeType,
@@ -251,6 +335,13 @@ async function settleUploadedRecord(
 ): Promise<void> {
   const outcome = deps.attemptRewrite(record);
   if (outcome === "rewritten" || outcome === "node-gone") {
+    if (record.mode === "overwrite") {
+      // The files cache may hold the diagram's PRE-save bytes under the URL
+      // the node carries; with the record gone the worker would fall back to
+      // them offline, offering a stale scene as an editable base (F3). Purge
+      // first, so a crash between the two calls errs on the safe side.
+      await deps.purgeCachedFile(record.attachmentId);
+    }
     await deps.deleteUploadRecord(record.attachmentId);
     return;
   }
@@ -260,6 +351,10 @@ async function settleUploadedRecord(
     // buster is stale. Deleting now frees the URL to reach the server again —
     // keeping the record would pin this tab's service worker to the local blob
     // forever on a page never reopened here, hiding newer server versions.
+    // Purge before deleting, same reasoning as above: this is the branch
+    // where the node's URL is not refreshed, so the stale cached bytes are
+    // the only thing an offline reopen could be handed.
+    await deps.purgeCachedFile(record.attachmentId);
     await deps.deleteUploadRecord(record.attachmentId);
     return;
   }
