@@ -71,7 +71,11 @@ export function resolveDirtyPageLink(pageId: string): DirtyPageLink | undefined 
  * not a working link, but it is a stable identifier the user can search for,
  * and it keeps the entry visible rather than hidden.
  */
-export function dirtyPageHref(record: DirtyPageRecord): string {
+export function dirtyPageHref(
+  // Structurally just the two fields used, so phase 4's upload records — which
+  // capture the same link metadata — can be linked with the same rules.
+  record: Pick<DirtyPageRecord, "pageId" | "link">,
+): string {
   const slug = record.link?.slugId ?? record.pageId;
   const spaceSlug = record.link?.spaceSlug;
   return spaceSlug

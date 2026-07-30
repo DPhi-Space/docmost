@@ -73,6 +73,12 @@ function harness(
     offlineDataIsOurs: () => true,
     subscribeOwnership: () => () => {},
     readOfflineDataOwner: async () => ({ status: 'none' }) as const,
+    replayUploads: async () => ({
+      attempted: 0,
+      uploaded: 0,
+      blocked: 0,
+      deferred: 0,
+    }),
     currentUserId: () => 'user-1',
     now: () => 1_000,
     publish: (next) => void published.push(next as Record<string, unknown>),
@@ -125,11 +131,32 @@ describe("isPassIncomplete", () => {
     blocked: 0,
     deferred: 0,
     skipped: false,
+    uploads: { attempted: 0, uploaded: 0, blocked: 0, deferred: 0 },
     ...over,
   });
 
   it("is incomplete when pages were deferred", () => {
     expect(isPassIncomplete(summary({ deferred: 1 }))).toBe(true);
+  });
+
+  it("is incomplete when uploads were deferred", () => {
+    expect(
+      isPassIncomplete(
+        summary({
+          uploads: { attempted: 1, uploaded: 0, blocked: 0, deferred: 1 },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("is complete when the only upload failures were refusals", () => {
+    expect(
+      isPassIncomplete(
+        summary({
+          uploads: { attempted: 1, uploaded: 0, blocked: 1, deferred: 0 },
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("is incomplete when another tab held the lock", () => {
@@ -338,6 +365,71 @@ describe("runResyncPass", () => {
     await runResyncPass("boot", h.deps);
 
     expect(h.published.at(-1)).toMatchObject({ phase: "idle", lastPass: null });
+  });
+
+  it("replays the upload outbox even when no page is dirty", async () => {
+    // An Excalidraw re-save queues an upload without touching the ydoc, so a
+    // pass with zero dirty pages still owes the outbox a replay.
+    const calls: boolean[] = [];
+    const h = harness([], {}, {
+      replayUploads: async (includeBlocked) => {
+        calls.push(includeBlocked);
+        return { attempted: 1, uploaded: 1, blocked: 0, deferred: 0 };
+      },
+    });
+
+    const summary = await runResyncPass("online", h.deps);
+
+    expect(calls).toEqual([true]);
+    expect(summary.uploads.uploaded).toBe(1);
+    expect(h.published.at(-1)).toMatchObject({
+      lastPass: { synced: 0, uploadedFiles: 1 },
+    });
+  });
+
+  it("passes the periodic-blocked rule through to the upload replay", async () => {
+    const calls: boolean[] = [];
+    const h = harness([], {}, {
+      replayUploads: async (includeBlocked) => {
+        calls.push(includeBlocked);
+        return { attempted: 0, uploaded: 0, blocked: 0, deferred: 0 };
+      },
+    });
+
+    await runResyncPass("periodic", h.deps);
+    await runResyncPass("manual", h.deps);
+
+    expect(calls).toEqual([false, true]);
+  });
+
+  it("never replays uploads when ownership refuses", async () => {
+    // The same gate as pages: pushing an unowned blob would upload the
+    // previous user's file under the current session's cookie.
+    let replayed = 0;
+    const h = harness([], {}, {
+      offlineDataIsOurs: () => false,
+      replayUploads: async () => {
+        replayed += 1;
+        return { attempted: 0, uploaded: 0, blocked: 0, deferred: 0 };
+      },
+    });
+
+    await runResyncPass("online", h.deps);
+
+    expect(replayed).toBe(0);
+  });
+
+  it("keeps the page summary when the upload replay throws", async () => {
+    const h = harness([record("a")], {}, {
+      replayUploads: async () => {
+        throw new Error("outbox unreadable");
+      },
+    });
+
+    const summary = await runResyncPass("online", h.deps);
+
+    expect(summary.synced).toBe(1);
+    expect(summary.uploads.attempted).toBe(0);
   });
 
   it("publishes the blocked list the UI lists", async () => {

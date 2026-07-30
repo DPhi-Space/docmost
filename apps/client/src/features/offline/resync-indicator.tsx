@@ -29,9 +29,10 @@ import {
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
-import { IconAlertTriangle } from "@tabler/icons-react";
+import { IconAlertTriangle, IconCloudUpload } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import type { BlockedReason, DirtyPageRecord } from "./dirty-pages";
+import type { UploadBlockedReason, UploadOutboxRecord } from "./upload-outbox";
 import { dirtyPageHref } from "./dirty-page-link";
 import { useOfflineEditingEnabled } from "./offline-editing-settings";
 import { useOnlineStatus } from "./online-state";
@@ -46,7 +47,15 @@ export function ResyncIndicator() {
   const { t } = useTranslation();
   const enabled = useOfflineEditingEnabled();
   const isOnline = useOnlineStatus();
-  const { phase, total, completed, blocked, lastPass } = useResyncState();
+  const {
+    phase,
+    total,
+    completed,
+    blocked,
+    pendingUploads,
+    blockedUploads,
+    lastPass,
+  } = useResyncState();
   const [reviewOpen, { open: openReview, close: closeReview }] =
     useDisclosure(false);
 
@@ -54,20 +63,25 @@ export function ResyncIndicator() {
   // the effect cannot re-fire on an unrelated re-render.
   const toastedRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!lastPass || lastPass.synced === 0) return;
+    const uploadedFiles = lastPass?.uploadedFiles ?? 0;
+    if (!lastPass || (lastPass.synced === 0 && uploadedFiles === 0)) return;
     if (toastedRef.current === lastPass.at) return;
     toastedRef.current = lastPass.at;
     // Singularised in code: the repo convention is English-string keys with no
     // translation-file edits, so i18next's `_one`/`_other` plural keys are not
     // available here.
+    const parts: string[] = [];
+    if (lastPass.synced === 1) parts.push(t("1 page"));
+    if (lastPass.synced > 1)
+      parts.push(t("{{count}} pages", { count: lastPass.synced }));
+    if (uploadedFiles === 1) parts.push(t("1 file"));
+    if (uploadedFiles > 1)
+      parts.push(t("{{count}} files", { count: uploadedFiles }));
     notifications.show({
       color: "green",
-      message:
-        lastPass.synced === 1
-          ? t("Offline changes synced (1 page)")
-          : t("Offline changes synced ({{count}} pages)", {
-              count: lastPass.synced,
-            }),
+      message: t("Offline changes synced ({{what}})", {
+        what: parts.join(", "),
+      }),
     });
   }, [lastPass, t]);
 
@@ -97,7 +111,35 @@ export function ResyncIndicator() {
     );
   }
 
-  if (blocked.length === 0) return null;
+  const blockedTotal = blocked.length + blockedUploads.length;
+
+  if (blockedTotal === 0) {
+    // Queued uploads waiting for a connection: a quiet standing note rather
+    // than nothing, because unlike a text edit no in-page banner mentions
+    // them once the user navigates away.
+    if (!isOnline && pendingUploads > 0) {
+      return (
+        <Paper
+          className={`${classes.pill} ${stacked ?? ""}`}
+          radius="xl"
+          shadow="sm"
+          role="status"
+        >
+          <Group gap={8} wrap="nowrap">
+            <IconCloudUpload size={16} stroke={1.5} />
+            <Text size="sm" c="dimmed">
+              {pendingUploads === 1
+                ? t("1 upload waiting for connection")
+                : t("{{count}} uploads waiting for connection", {
+                    count: pendingUploads,
+                  })}
+            </Text>
+          </Group>
+        </Paper>
+      );
+    }
+    return null;
+  }
 
   return (
     <>
@@ -110,15 +152,15 @@ export function ResyncIndicator() {
         <UnstyledButton
           className={classes.reviewButton}
           onClick={openReview}
-          aria-label={t("Review pages that could not sync")}
+          aria-label={t("Review changes that could not sync")}
         >
           <Group gap={8} wrap="nowrap">
             <IconAlertTriangle size={16} stroke={1.5} color="orange" />
             <Text size="sm" c="dimmed">
-              {blocked.length === 1
-                ? t("1 page could not sync — review")
-                : t("{{count}} pages could not sync — review", {
-                    count: blocked.length,
+              {blockedTotal === 1
+                ? t("1 item could not sync — review")
+                : t("{{count}} items could not sync — review", {
+                    count: blockedTotal,
                   })}
             </Text>
           </Group>
@@ -128,19 +170,24 @@ export function ResyncIndicator() {
       <Modal
         opened={reviewOpen}
         onClose={closeReview}
-        title={t("Pages that could not sync")}
+        title={t("Changes that could not sync")}
         size="lg"
       >
         <Stack gap="sm">
           <Text size="sm" c="dimmed">
             {t(
-              "These pages hold changes that are saved on this device but that the server would not accept. Nothing has been discarded — open a page to see and copy its changes.",
+              "These changes are saved on this device but the server would not accept them. Nothing has been discarded.",
             )}
           </Text>
           <List spacing="xs">
             {blocked.map((record) => (
               <List.Item key={record.pageId}>
                 <BlockedPageRow record={record} onNavigate={closeReview} />
+              </List.Item>
+            ))}
+            {blockedUploads.map((record) => (
+              <List.Item key={record.attachmentId}>
+                <BlockedUploadRow record={record} onNavigate={closeReview} />
               </List.Item>
             ))}
           </List>
@@ -173,6 +220,72 @@ function BlockedPageRow({
       </Text>
     </Stack>
   );
+}
+
+/**
+ * A blocked upload row. The blob is the only copy of the file anywhere, so
+ * besides the page link the row offers a plain download — the one recovery
+ * that works even when the page itself is gone.
+ */
+function BlockedUploadRow({
+  record,
+  onNavigate,
+}: {
+  record: UploadOutboxRecord;
+  onNavigate: () => void;
+}) {
+  const { t } = useTranslation();
+
+  const download = () => {
+    const url = URL.createObjectURL(record.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = record.fileName;
+    anchor.click();
+    // Delayed: revoking before the browser has opened the blob aborts the
+    // download in some engines.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+
+  return (
+    <Stack gap={2}>
+      <Group gap={6} wrap="nowrap">
+        <Text size="sm">{record.fileName}</Text>
+        <Anchor component="button" type="button" size="xs" onClick={download}>
+          {t("Download")}
+        </Anchor>
+        <Anchor
+          component={Link}
+          to={dirtyPageHref(record)}
+          onClick={onNavigate}
+          size="xs"
+        >
+          {record.link?.title || t("Open page")}
+        </Anchor>
+      </Group>
+      <Text size="xs" c="dimmed">
+        {blockedUploadReasonText(record.blocked?.reason, t)}
+      </Text>
+    </Stack>
+  );
+}
+
+function blockedUploadReasonText(
+  reason: UploadBlockedReason | undefined,
+  t: (key: string) => string,
+): string {
+  switch (reason) {
+    case "no-access":
+      return t(
+        "The upload was refused — the page may have been deleted, or your access removed.",
+      );
+    case "rejected":
+      return t(
+        "The server rejected the file — it may be too large or of a type it does not accept.",
+      );
+    default:
+      return t("The file could not be uploaded to the server.");
+  }
 }
 
 function blockedReasonText(

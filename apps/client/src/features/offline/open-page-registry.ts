@@ -23,6 +23,25 @@
 let openPageId: string | null = null;
 
 /**
+ * Phase 4 listens for "a page just came on screen": the deferred node-attr
+ * rewrite (`pending-node-rewrite.ts`) can only run in a page's live editor,
+ * so the moment it opens is the moment deferred work becomes possible.
+ * Notified only on an actual change of claim, with the new value.
+ */
+const listeners = new Set<(pageId: string | null) => void>();
+
+function notify(): void {
+  for (const listener of listeners) listener(openPageId);
+}
+
+export function subscribeOpenPage(
+  listener: (pageId: string | null) => void,
+): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/**
  * The editor has taken this document.
  *
  * Always succeeds. A resync in flight for the same page discovers this on its
@@ -30,7 +49,9 @@ let openPageId: string | null = null;
  * picked up again later — by the editor's own provider, most likely.
  */
 export function claimOpenPage(pageId: string): void {
+  if (openPageId === pageId) return;
   openPageId = pageId;
+  notify();
 }
 
 /**
@@ -42,7 +63,9 @@ export function claimOpenPage(pageId: string): void {
  * claim that had already been re-made for the page now on screen.
  */
 export function releaseOpenPage(pageId: string): void {
-  if (openPageId === pageId) openPageId = null;
+  if (openPageId !== pageId) return;
+  openPageId = null;
+  notify();
 }
 
 export function getOpenPage(): string | null {
@@ -52,4 +75,5 @@ export function getOpenPage(): string | null {
 /** Test seam: module state has to be resettable between cases. */
 export function resetOpenPageForTests(): void {
   openPageId = null;
+  listeners.clear();
 }
