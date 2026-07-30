@@ -532,22 +532,41 @@ past its initial-empty state (a just-mounted editor holds one empty paragraph un
 replays — "empty" must read as *not loaded yet*). `overwrite` records are deleted after upload
 even unrewritten: the node already points at the real id, only the `?t=` cache-buster is stale,
 and keeping the record would pin the SW to the local blob forever on a page never reopened here.
+**Every overwrite settlement also purges the SW files cache for that attachment id**
+(`purgeCachedAttachment`, matching by the same `outboxCandidateIdFromPath` rule the worker
+uses): the cache can hold the diagram's *pre-save* bytes under the very URL the node carries,
+and with the record gone an offline reopen would otherwise be handed that stale scene as an
+**editable base**, whose next queued save silently overwrites the user's own newer server
+version. "Broken image until reconnect" is the accepted cost; a stale editable base is not.
 Consequence of deferral, stated plainly: until the uploading device reopens the page, **other
 clients see the placeholder URL as a broken attachment** (their SW has no such record). The
 replay pushes promptly on reconnect, so the window is normally the same as the page resync's.
+The replay also **re-reads each record at upload time** rather than trusting the pass-start
+snapshot: a record deleted mid-pass (the user saved the same diagram directly online) is
+skipped, and a record re-saved mid-pass uploads its fresh blob — replaying a stale snapshot of
+an overwrite could otherwise land *older* bytes as the server's latest.
 
 **Session expiry preserves the outbox under the provable-ownership rules** — the same deliberate
 narrowing as #18's, extended: a queued blob can be the only copy of a drawing, so the 401 path
 preserves the outbox whenever it holds records (or cannot be read — "I cannot tell" preserves,
 never erases) *and* the owner hint + stamp succeed; with no provable owner it is erased with
-everything else, work included. Two things the dirty-registry logic alone would get wrong, now
+everything else, work included. Four things the dirty-registry logic alone would get wrong, all
 pinned by tests: the outbox is consulted **independently** (an Excalidraw re-save queues an
-upload without ever touching the ydoc, so "no dirty pages" ≠ "no pending work"), and preserving
-only the outbox still counts as "preserving something" so the owner hint survives. Explicit
-logout still erases everything, unconditionally. The replay itself sits behind
-`offlineDataIsOurs()` twice (cached verdict + the stamp beside the records). **Known gap,
-deliberate**: the service worker cannot know who is signed in, so until sign-in reconcile erases
-a foreign outbox it would serve a previous user's blob to a session that requests its
+upload without ever touching the ydoc, so "no dirty pages" ≠ "no pending work"); preserving
+only the outbox still counts as "preserving something" so the owner hint survives; the
+**dirty-page store is preserved whenever anything is** — including outbox-only work — because
+the owner stamp lives *inside* it under a reserved key, and clearing it would stamp the owner
+and then destroy the stamp one call later, leaving preserved blobs unattributable (an
+empty-but-stamped registry is harmless; every listing filters the reserved key out; there is an
+end-to-end test wiring the real store to prove the stamp survives); and **reconcile's unstamped
+branch consults the outbox as well as the dirty registry** — an unstamped disk whose outbox
+holds records is erased exactly like one with dirty pages, since a foreign blob left behind
+would otherwise replay under the next user's cookie or be offered to them as a Download from
+the blocked list. A genuinely fresh browser — both stores empty — still reads as clean and
+never pays. Explicit logout still erases everything, unconditionally. The replay itself sits
+behind `offlineDataIsOurs()` twice (cached verdict + the stamp beside the records). **Known
+gap, deliberate**: the service worker cannot know who is signed in, so until sign-in reconcile
+erases a foreign outbox it would serve a previous user's blob to a session that requests its
 placeholder URL — reaching one requires knowing that UUID, and rules 1/3 of the ownership
 scheme bound the window exactly as they do for `page.*` documents.
 
@@ -577,10 +596,18 @@ Known limitations, documented rather than hidden: page **titles** remain REST-on
 title edits are still lost (#19's note stands); draw.io is an external iframe and permanently
 out of scope offline; a blocked upload whose cause is fixed server-side is retried on trigger
 passes only, like blocked pages; an `uploaded` create-record whose page is never reopened in
-this tab keeps its blob on disk indefinitely (logout clears it); and pending media inserted
+this tab keeps its blob on disk indefinitely (logout clears it); pending media inserted
 offline renders no per-node badge — the queued state is announced once via notification and
 surfaced in the standing pill ("N uploads waiting for connection" offline, and the blocked
-list), a deliberate trade against patching four upstream node views.
+list), a deliberate trade against patching four upstream node views; **a queued VIDEO does not
+preview while pending** — browsers fetch `<video>` with a `Range` header, and Range requests
+are passed through untouched (a pre-existing, load-bearing SW invariant: a cached full body
+answered to a Range request, or a cached 206, corrupts playback), so the placeholder URL goes
+to the network and fails until the upload replays; the blob itself is safe and uploads like
+everything else; and **cutting a pending node and pasting it on a different page** leaves the
+record's `pageId` pointing at the original page, so when *that* page next opens the watcher
+reads "node gone" and deletes the record — the pasted copy's placeholder URL stops rendering,
+while the bytes survive server-side (after replay) as an attachment of the original page.
 
 **Upload outbox repro** (add to the offline-editing repro; switch on, page previously synced):
 
@@ -590,7 +617,9 @@ list), a deliberate trade against patching four upstream node views.
    stale server copy.
 2. Offline, paste an image and drag-drop a PDF: both render immediately and survive a reload
    while still offline. DevTools → Network shows the `/api/files/<uuid>/...` requests answered
-   by the service worker (`x-docmost-sw-outbox: 1`).
+   by the service worker (`x-docmost-sw-outbox: 1`). A dropped **video** queues but does not
+   preview while pending (Range requests bypass the worker — see the limitations above); it
+   must still upload and resolve on reconnect like the others.
 3. Reconnect: `[docmost] offline uploads: … queued upload(s) to push` in the console, the toast
    counts files, and the nodes now point at real attachment ids (`select id, file_name from
    attachments order by created_at desc` grows). The Excalidraw attachment keeps its id.

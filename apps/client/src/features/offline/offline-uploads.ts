@@ -295,13 +295,15 @@ async function queueOneMediaFile(
 
   if (!inserted) {
     // No node means no rewrite target and nothing rendering the blob; the
-    // record would replay into an attachment nothing references. Withdraw it.
+    // record would replay into an attachment nothing references. Withdraw it —
+    // and say plainly that the file was NOT saved, since the blob is gone.
     await deleteUploadRecord(id);
     notifications.show({
       color: "red",
-      message: i18n.t("Could not insert {{name}} into the page.", {
-        name: file.name || "the file",
-      }),
+      message: i18n.t(
+        "{{name}} was not saved — it could not be inserted into the page.",
+        { name: file.name || "The file" },
+      ),
     });
     return;
   }
