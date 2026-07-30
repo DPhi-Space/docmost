@@ -54,6 +54,7 @@ import {
   type DirtyPagesRead,
   type OfflineDataOwner,
 } from "./dirty-pages";
+import { readUploadOutbox, type UploadOutboxRead } from "./upload-outbox";
 
 export type OwnershipStatus =
   /** Not established yet, or established as somebody else's. Refuse. */
@@ -123,6 +124,16 @@ export interface ReconcileDeps {
   readOfflineDataOwner?: () => Promise<OfflineDataOwner>;
   /** Whether this disk holds offline work at all; see the `"none"` branch. */
   readDirtyPages?: () => Promise<DirtyPagesRead>;
+  /**
+   * The phase-4 upload outbox is work in its own right, and **must** be
+   * consulted alongside the dirty registry: an Excalidraw re-save queues a
+   * blob without ever touching a page's Yjs document, so a disk can hold a
+   * previous user's drawings while its dirty registry is empty. Skipping the
+   * outbox here let an unstamped foreign blob read as "clean" — and then
+   * replay under the next user's cookie, with the refused copy offered to
+   * them as a Download in the blocked list.
+   */
+  readUploadOutbox?: () => Promise<UploadOutboxRead>;
   clearOfflineData?: () => Promise<void>;
 }
 
@@ -153,6 +164,7 @@ export async function reconcileOfflineDataOwnership(
   const {
     readOfflineDataOwner: readOwner = readOfflineDataOwner,
     readDirtyPages: readPages = readDirtyPages,
+    readUploadOutbox: readOutbox = readUploadOutbox,
     clearOfflineData: clear = clearOfflineData,
   } = deps;
 
@@ -188,7 +200,14 @@ export async function reconcileOfflineDataOwnership(
      * cannot hand its contents to whoever signs in next.
      */
     const pages = await readPages();
-    const holdsWork = !pages.readable || pages.records.length > 0;
+    const outbox = await readOutbox();
+    // Either store unreadable, or either store holding records, is "work on
+    // an unclaimed disk". A fresh browser has neither and still never pays.
+    const holdsWork =
+      !pages.readable ||
+      pages.records.length > 0 ||
+      !outbox.readable ||
+      outbox.records.length > 0;
     if (!holdsWork) {
       setStatus("ours");
       return "clean";

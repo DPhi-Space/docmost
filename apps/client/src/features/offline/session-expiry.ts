@@ -224,10 +224,18 @@ export async function clearOfflineDataOnSessionExpiry(
   await clear({
     preservePageIds: records.map((record) => record.pageId),
     preserveAllPages,
-    // The dirty registry is preserved only when it indexes preserved documents;
-    // with no dirty pages (outbox-only work) there is nothing for it to index
-    // and `clearOfflineData` clears it as usual.
-    preserveDirtyPages: records.length > 0 || preserveAllPages,
+    /**
+     * The dirty-page STORE is preserved whenever *anything* is preserved —
+     * including outbox-only work — because the owner stamp lives inside it
+     * (`OFFLINE_DATA_OWNER_RECORD_KEY`), and `clearDirtyPages()` wipes the
+     * whole store, stamp included. An earlier version cleared it in the
+     * outbox-only case, which stamped the owner and then destroyed the stamp
+     * in the very next call: the preserved blobs were left unattributable,
+     * which is the state reconcile erases (rule 1 — the stamp beside the data
+     * IS the proof). An empty-but-stamped registry is harmless: the reserved
+     * key is not a page record and every listing filters it out.
+     */
+    preserveDirtyPages: records.length > 0 || preserveAllPages || outboxHoldsWork,
     preserveUploadOutbox: outboxHoldsWork,
   });
 
