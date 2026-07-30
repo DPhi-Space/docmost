@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render } from "@testing-library/react";
-import { Provider, useAtom } from "jotai";
+import { createStore, Provider } from "jotai";
 import { WebSocketStatus } from "@hocuspocus/provider";
 import { yjsConnectionStatusAtom } from "@/features/editor/atoms/editor-atoms";
 import {
@@ -9,19 +9,24 @@ import {
 } from "./collab-connection-watch";
 import { resetReachabilityForTests } from "./reachability";
 
-let setStatus: (status: string) => void;
-
-/**
- * Rendered inside a jotai `Provider` in every case below. `yjsConnectionStatusAtom`
- * is module-global — that is exactly why the real hook has to treat a stale value
- * as meaningless — so without a fresh store per render, one case's `Connected`
- * leaks into the next and the "never had a status" case cannot fail.
- */
 function Host() {
-  const [, set] = useAtom(yjsConnectionStatusAtom);
-  setStatus = set;
   useCollabConnectionWatch();
   return null;
+}
+
+/**
+ * `yjsConnectionStatusAtom` is module-global — that is exactly why the real hook
+ * has to treat a stale value as meaningless — so every case gets an explicit,
+ * fresh store and the "never had a status" case can fail independently.
+ */
+function renderHost() {
+  const store = createStore();
+  render(
+    <Provider store={store}>
+      <Host />
+    </Provider>,
+  );
+  return store;
 }
 
 /** A monitor that records what it is told rather than acting on it. */
@@ -50,13 +55,9 @@ describe("useCollabConnectionWatch", () => {
   it("treats a completed handshake as proof the server is reachable", () => {
     const monitor = recordingMonitor();
     const reached = vi.spyOn(monitor, "reportReached");
-    render(
-      <Provider>
-        <Host />
-      </Provider>,
-    );
+    const store = renderHost();
 
-    act(() => setStatus(WebSocketStatus.Connected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Connected));
 
     expect(reached).toHaveBeenCalled();
   });
@@ -66,11 +67,7 @@ describe("useCollabConnectionWatch", () => {
     const suspect = vi.spyOn(monitor, "reportSuspect");
     const reached = vi.spyOn(monitor, "reportReached");
 
-    render(
-      <Provider>
-        <Host />
-      </Provider>,
-    );
+    renderHost();
     vi.advanceTimersByTime(DISCONNECT_GRACE_MS * 5);
 
     // The atom is `""` before any editor mounts and keeps its last value after
@@ -85,16 +82,12 @@ describe("useCollabConnectionWatch", () => {
     // fire a probe per navigation for nothing.
     const monitor = recordingMonitor();
     const suspect = vi.spyOn(monitor, "reportSuspect");
-    render(
-      <Provider>
-        <Host />
-      </Provider>,
-    );
+    const store = renderHost();
 
-    act(() => setStatus(WebSocketStatus.Connected));
-    act(() => setStatus(WebSocketStatus.Disconnected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Connected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Disconnected));
     vi.advanceTimersByTime(DISCONNECT_GRACE_MS - 1);
-    act(() => setStatus(WebSocketStatus.Connected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Connected));
     vi.advanceTimersByTime(DISCONNECT_GRACE_MS * 5);
 
     expect(suspect).not.toHaveBeenCalled();
@@ -105,14 +98,10 @@ describe("useCollabConnectionWatch", () => {
     // the first — and often the only — signal that the network has died.
     const monitor = recordingMonitor();
     const suspect = vi.spyOn(monitor, "reportSuspect");
-    render(
-      <Provider>
-        <Host />
-      </Provider>,
-    );
+    const store = renderHost();
 
-    act(() => setStatus(WebSocketStatus.Connected));
-    act(() => setStatus(WebSocketStatus.Disconnected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Connected));
+    act(() => store.set(yjsConnectionStatusAtom, WebSocketStatus.Disconnected));
     vi.advanceTimersByTime(DISCONNECT_GRACE_MS);
 
     expect(suspect).toHaveBeenCalledOnce();

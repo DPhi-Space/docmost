@@ -1,5 +1,5 @@
 import { Button, Checkbox, Group, Modal, Text } from "@mantine/core";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 interface LockPageModalProps {
@@ -18,20 +18,21 @@ export default function LockPageModal({
   const { t } = useTranslation();
   const [recursive, setRecursive] = useState(false);
 
-  // The checkbox is a per-invocation choice, not a saved preference.
-  useEffect(() => {
-    if (opened) setRecursive(false);
-  }, [opened]);
+  const handleClose = () => {
+    // The checkbox is a per-invocation choice, not a saved preference.
+    setRecursive(false);
+    onClose();
+  };
 
   const handleConfirm = () => {
     onConfirm(recursive);
-    onClose();
+    handleClose();
   };
 
   return (
     <Modal
       opened={opened}
-      onClose={onClose}
+      onClose={handleClose}
       title={isLocked ? t("Unlock page") : t("Lock page")}
       size={450}
       padding="xl"
@@ -54,7 +55,7 @@ export default function LockPageModal({
       />
 
       <Group justify="end" mt="lg">
-        <Button onClick={onClose} variant="default">
+        <Button onClick={handleClose} variant="default">
           {t("Cancel")}
         </Button>
         <Button onClick={handleConfirm}>
