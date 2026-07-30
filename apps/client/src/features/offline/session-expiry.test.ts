@@ -155,6 +155,11 @@ describe("clearOfflineDataOnSessionExpiry", () => {
     // The hint survives so a later 401 in the same signed-out window cannot
     // re-run the erase branch against the preserved outbox.
     expect(readOfflineDataOwnerHint(storage)).toBe("user-1");
+    // And the login page is told about the queued upload (gap #5): the notice
+    // used to carry pages only, so outbox-only preservation announced nothing.
+    const notice = readPendingRecovery(storage);
+    expect(notice).not.toBeNull();
+    expect(notice?.uploads).toBe(1);
   });
 
   it("keeps the owner stamp readable beside an outbox-only preservation (end to end)", async () => {
@@ -326,6 +331,7 @@ describe("clearOfflineDataOnSessionExpiry", () => {
       at: 1234,
       ownerUserId: "user-1",
       pages: [{ pageId: "p1", title: "Notes" }],
+      uploads: 0,
     });
   });
 
@@ -372,7 +378,7 @@ describe("readPendingRecovery", () => {
     ).toBeNull();
   });
 
-  it("ignores a record that names no pages", () => {
+  it("ignores a record that names no pages and no uploads", () => {
     expect(
       readPendingRecovery(
         memoryStorage({
@@ -380,6 +386,48 @@ describe("readPendingRecovery", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      readPendingRecovery(
+        memoryStorage({
+          [PENDING_RECOVERY_KEY]: JSON.stringify({
+            at: 1,
+            pages: [],
+            uploads: 0,
+          }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("renders a notice for outbox-only preserved work (gap #5)", () => {
+    // An Excalidraw re-save queues an upload without touching the ydoc, so a
+    // session can expire holding uploads but zero dirty pages. The notice used
+    // to read that state as "nothing preserved" and render nothing.
+    const notice = readPendingRecovery(
+      memoryStorage({
+        [PENDING_RECOVERY_KEY]: JSON.stringify({
+          at: 1,
+          ownerUserId: "user-1",
+          pages: [],
+          uploads: 2,
+        }),
+      }),
+    );
+    expect(notice).not.toBeNull();
+    expect(notice?.uploads).toBe(2);
+  });
+
+  it("still accepts pre-#21 notices that carry only pages", () => {
+    const notice = readPendingRecovery(
+      memoryStorage({
+        [PENDING_RECOVERY_KEY]: JSON.stringify({
+          at: 1,
+          ownerUserId: "user-1",
+          pages: [{ pageId: "p1", title: "Notes" }],
+        }),
+      }),
+    );
+    expect(notice?.pages).toHaveLength(1);
   });
 
   it("tolerates storage that throws", () => {

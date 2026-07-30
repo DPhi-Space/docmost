@@ -79,6 +79,8 @@ function harness(
       blocked: 0,
       deferred: 0,
     }),
+    listUploadRecords: async () => [],
+    publishUploadRecords: () => {},
     currentUserId: () => 'user-1',
     now: () => 1_000,
     publish: (next) => void published.push(next as Record<string, unknown>),
@@ -334,6 +336,49 @@ describe("runResyncPass", () => {
     await runResyncPass("boot", h.deps);
 
     expect(h.attempted).toEqual([]);
+  });
+
+  it("gap #4 regression: an offline boot still publishes the queued work", async () => {
+    // Reload-while-offline: the outbox holds records and the registry holds a
+    // blocked page, but no pass can run — enqueue-time publishing died with
+    // the previous document, so this early return is the only publisher left.
+    // The pill used to stay empty over a populated outbox until the first
+    // online pass.
+    const uploadRecords = [{ attachmentId: "att-1", status: "pending" }];
+    const publishedUploads: unknown[] = [];
+    const h = harness(
+      [{ ...record("a"), blocked: { reason: "not-accepted", at: 1 } }],
+      {},
+      {
+        isOnline: () => false,
+        listUploadRecords: async () => uploadRecords as never,
+        publishUploadRecords: (records) => void publishedUploads.push(records),
+      },
+    );
+
+    await runResyncPass("boot", h.deps);
+
+    expect(h.attempted).toEqual([]);
+    expect(publishedUploads).toEqual([uploadRecords]);
+    expect(h.published).toContainEqual(
+      expect.objectContaining({
+        blocked: [expect.objectContaining({ pageId: "a" })],
+      }),
+    );
+  });
+
+  it("gap #4: publishes nothing before ownership settles (a stranger's counts stay private)", async () => {
+    const publishedUploads: unknown[] = [];
+    const h = harness([record("a")], {}, {
+      isOnline: () => false,
+      offlineDataIsOurs: () => false,
+      publishUploadRecords: (records) => void publishedUploads.push(records),
+    });
+
+    await runResyncPass("boot", h.deps);
+
+    expect(publishedUploads).toEqual([]);
+    expect(h.published).toEqual([]);
   });
 
   it("stands down without attempting anything when another tab holds the lock", async () => {

@@ -95,6 +95,24 @@ export interface PendingRecoveryNotice {
   at: number;
   ownerUserId: string;
   pages: PendingRecoveryPage[];
+  /**
+   * Queued attachment uploads preserved alongside the pages (phase 4). Absent
+   * in notices written before this field existed; those still validate on
+   * `pages` alone. An outbox that could not be read is preserved but cannot be
+   * counted — that case writes `uploads: 0` and the notice (if any) stands on
+   * the pages, which matches what can honestly be claimed.
+   */
+  uploads?: number;
+}
+
+/** A notice is worth showing iff it names at least one page or one upload. */
+export function isNoticeWorthShowing(
+  notice: PendingRecoveryNotice | null | undefined,
+): notice is PendingRecoveryNotice {
+  if (!notice) return false;
+  const pages = Array.isArray(notice.pages) ? notice.pages.length : 0;
+  const uploads = typeof notice.uploads === "number" ? notice.uploads : 0;
+  return pages > 0 || uploads > 0;
 }
 
 const defaultStorage = defaultOwnerStorage;
@@ -106,9 +124,11 @@ export function readPendingRecovery(
     const raw = storage?.getItem(PENDING_RECOVERY_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PendingRecoveryNotice;
-    return Array.isArray(parsed?.pages) && parsed.pages.length > 0
-      ? parsed
-      : null;
+    if (!Array.isArray(parsed?.pages)) return null;
+    // Outbox-only preservation is real preserved work (an Excalidraw re-save
+    // never touches the ydoc), so a notice with zero pages but a positive
+    // upload count must render, not read as empty (gap #5 of the #21 review).
+    return isNoticeWorthShowing(parsed) ? parsed : null;
   } catch {
     // A corrupt notice must not break the login page.
     return null;
@@ -247,6 +267,10 @@ export async function clearOfflineDataOnSessionExpiry(
         pageId: record.pageId,
         title: record.link?.title,
       })),
+      // Counted only when the outbox could be read; an unreadable outbox is
+      // preserved but cannot honestly be counted, and the notice must never
+      // claim uploads that may not exist.
+      uploads: outbox.readable ? outbox.records.length : 0,
     },
     storage,
   );
