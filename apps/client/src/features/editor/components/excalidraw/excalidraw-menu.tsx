@@ -28,7 +28,10 @@ import {
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import { getFileUrl } from "@/lib/config.ts";
-import { saveExcalidrawOrQueue } from "@/features/offline/offline-uploads";
+import {
+  notifyDiagramLoadFailed,
+  saveExcalidrawOrQueue,
+} from "@/features/offline/offline-uploads";
 import { svgStringToFile } from "@/lib";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
@@ -179,13 +182,20 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
       const data = await loadFromBlob(await request.blob(), null, null);
       setExcalidrawData(data);
     } catch (err) {
+      // Do NOT open on a failed load: this menu only opens EXISTING diagrams
+      // (`editorState.src` is required above), so an empty canvas here is
+      // never right — saving from it would overwrite the real drawing with a
+      // blank scene. Seen offline/reconnect during the #21 verification as an
+      // apparent "Uncaught TypeError: Failed to fetch" from this chunk.
       console.error(err);
-    } finally {
+      notifyDiagramLoadFailed();
       setIsLoading(false);
-      isDirtyRef.current = false;
-      isInitialLoadRef.current = true;
-      open();
+      return;
     }
+    setIsLoading(false);
+    isDirtyRef.current = false;
+    isInitialLoadRef.current = true;
+    open();
   }, [editorState?.src, open]);
 
   const saveData = useCallback(async () => {

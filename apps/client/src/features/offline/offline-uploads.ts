@@ -45,6 +45,7 @@ import {
   enqueueUpload,
   listUploadRecords,
   newPlaceholderAttachmentId,
+  pendingFileSrc,
   readUploadRecord,
 } from "./upload-outbox";
 import {
@@ -72,10 +73,11 @@ export interface SaveExcalidrawInput {
 export interface SaveExcalidrawResult {
   queued: boolean;
   /**
-   * Attrs to apply via `updateAttributes`, or null when the node must not be
-   * touched — a queued re-save of an existing diagram keeps pointing at its
-   * current `src` (the service worker serves the queued blob for it), and the
-   * upload replay refreshes the `?t=` cache-buster once the server has it.
+   * Attrs to apply via `updateAttributes`. For a queued re-save of an
+   * existing diagram the id and path are unchanged and only the `?t=`
+   * cache-buster moves, so the in-page preview re-fetches through the service
+   * worker and shows the queued blob immediately (review gap #3). Null only
+   * on paths that have nothing to apply.
    */
   attrs: ExcalidrawNodeAttrs | null;
 }
@@ -199,7 +201,23 @@ async function queueExcalidrawSave(
           mimeType: input.file.type || "image/svg+xml",
           timestamp: now,
         }) as unknown as ExcalidrawNodeAttrs)
-      : null,
+      : /**
+         * A queued overwrite keeps its id and path but gets a fresh `?t=`
+         * cache-buster (review gap #3): the node view re-assigns `el.src`
+         * whenever `src` changes, so the in-page preview re-fetches through
+         * the service worker — which serves the queued blob — instead of
+         * showing the stale bytes until a reload. The attr write is an
+         * ordinary offline document edit: it marks the page dirty and syncs
+         * the new `?t=` with everything else on reconnect, which is also what
+         * a direct online save would have done. The SW matches by attachment
+         * id, so the query string never affects which bytes are served.
+         */
+        {
+          src: `${pendingFileSrc(id, input.file.name)}?t=${now}`,
+          title: input.file.name,
+          size: input.file.size,
+          attachmentId: id,
+        },
   };
 }
 
@@ -311,6 +329,26 @@ async function queueOneMediaFile(
   notifyQueued(
     "Saved on this device — the file will upload when you're back online.",
   );
+}
+
+/**
+ * Announce that an existing diagram's scene could not be loaded.
+ *
+ * Lives here so `excalidraw-menu.tsx` keeps its single offline import. The
+ * call site matters more than the message: `handleOpen` used to open the
+ * modal from its `finally` even when the scene fetch failed, handing the user
+ * an **empty editable canvas over an existing diagram** — whose next save (or
+ * 60 s autosave) overwrites the real content, queued blob included, with a
+ * blank drawing. A failed load must therefore *refuse to open* and say why;
+ * the drawing itself is safe where it was (server, outbox, or SW cache).
+ */
+export function notifyDiagramLoadFailed(): void {
+  notifications.show({
+    color: "red",
+    message: i18n.t(
+      "Could not load the diagram — check your connection and try again.",
+    ),
+  });
 }
 
 /** Re-exported so the touched call sites need exactly one import. */
