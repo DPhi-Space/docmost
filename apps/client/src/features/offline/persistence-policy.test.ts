@@ -181,6 +181,12 @@ describe("isCorruptInfiniteData", () => {
     ["an undefined page (committed live before serialization)", [undefined]],
     ["an HTML body stored as a page", ["<!doctype html><html>…"]],
     ["a corrupt page after valid ones", [{ items: [], meta: {} }, null]],
+    // A proxy's 200 JSON error body: object-shaped, so it passes a bare
+    // object check and the guarded getNextPageParam — and then crash-loops in
+    // the component consumers reading `page.items`. A page is an IPagination
+    // or it is corruption.
+    ["an object page that is not a pagination", [{ message: "upstream timeout" }]],
+    ["a page whose items is not an array", [{ items: "nope", meta: {} }]],
   ])("flags %s", (_name, pages) => {
     expect(isCorruptInfiniteData({ pages, pageParams: [undefined] })).toBe(true);
   });
