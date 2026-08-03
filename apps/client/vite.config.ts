@@ -1,10 +1,34 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "child_process";
 import * as path from "path";
 import { excalidrawAssetsPlugin } from "./src/features/offline/build/excalidraw-assets-plugin";
+import { resolveBuildId } from "./src/features/offline/build/build-id";
 import { serviceWorkerPlugin } from "./src/features/offline/build/service-worker-plugin";
 
 const envPath = path.resolve(process.cwd(), "..", "..");
+
+// The decision logic lives in features/offline/build (pure, tested); this is
+// only the wiring to the real sources.
+function buildId(): string {
+  return resolveBuildId({
+    env: process.env.BUILD_ID,
+    gitShortSha: () => {
+      try {
+        return (
+          execSync("git rev-parse --short HEAD", {
+            stdio: ["ignore", "pipe", "ignore"],
+          })
+            .toString()
+            .trim() || null
+        );
+      } catch {
+        return null;
+      }
+    },
+    timestamp: Date.now,
+  });
+}
 
 export default defineConfig(({ mode }) => {
   const {
@@ -35,6 +59,7 @@ export default defineConfig(({ mode }) => {
         POSTHOG_KEY,
       },
       APP_VERSION: JSON.stringify(process.env.npm_package_version),
+      APP_BUILD_ID: JSON.stringify(buildId()),
     },
     plugins: [
       react(),

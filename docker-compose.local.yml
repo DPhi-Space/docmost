@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Offline query-cache buster. Unset is fine — the build then rotates
+        # by timestamp (features/offline/build/build-id.ts). To pin instead:
+        #   BUILD_ID=$(git rev-parse --short HEAD) docker compose -f docker-compose.local.yml build
+        BUILD_ID: ${BUILD_ID:-}
     depends_on:
       - db
       - redis

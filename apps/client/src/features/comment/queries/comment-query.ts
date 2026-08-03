@@ -28,7 +28,7 @@ export function useCommentsQuery(params: ICommentParams) {
       getPageComments({ pageId: params.pageId, cursor: pageParam, limit: 100 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.meta.hasNextPage ? lastPage.meta.nextCursor : undefined,
+      lastPage?.meta?.hasNextPage ? lastPage.meta.nextCursor : undefined,
     enabled: !!params.pageId,
   });
 
@@ -39,10 +39,11 @@ export function useCommentsQuery(params: ICommentParams) {
   }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
 
   const data = useMemo<IPagination<IComment> | undefined>(() => {
-    if (!query.data) return undefined;
+    const pages = query.data?.pages.filter((page) => page != null);
+    if (!pages?.length) return undefined;
     return {
-      items: query.data.pages.flatMap((p) => p.items),
-      meta: query.data.pages[query.data.pages.length - 1].meta,
+      items: pages.flatMap((p) => p.items),
+      meta: pages[pages.length - 1].meta,
     };
   }, [query.data]);
 

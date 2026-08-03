@@ -1,10 +1,13 @@
 /**
- * What offline persistence is allowed to write, and when.
+ * What offline persistence is allowed to write, when, and what it may read
+ * back.
  *
- * Two decisions, both pure and dependency-free so they can be unit tested
+ * Three decisions, all pure and dependency-free so they can be unit tested
  * exhaustively: which queries may leave memory ({@link shouldDehydrateQuery}),
- * and whether a given snapshot is worth writing at all
- * ({@link isSnapshotWorthPersisting}). `persistence.ts` is the only caller and
+ * whether a given snapshot is worth writing at all
+ * ({@link isSnapshotWorthPersisting}), and which restored entries must be
+ * dropped as corrupt before they reach the query cache
+ * ({@link sanitizeRestoredClient}). `persistence.ts` is the only caller and
  * does nothing but delegate here.
  *
  * The rule is an **allowlist keyed on `queryKey[0]`** — never a denylist. New
@@ -97,21 +100,93 @@ export function isPersistableQueryKey(queryKey: readonly unknown[]): boolean {
 /** The subset of a React Query `Query` this policy needs to see. */
 export interface DehydrationCandidate {
   queryKey: readonly unknown[];
-  state: { status: string };
+  state: { status: string; data?: unknown };
+}
+
+/**
+ * Infinite-query data whose `pages` array holds something that is not a page.
+ *
+ * React Query validates only the *top-level* fetch result against `undefined`;
+ * for an infinite query that result is the `{ pages, pageParams }` wrapper, so
+ * a queryFn that resolves `undefined` or `null` for one page (observed in
+ * production when a reverse proxy answered an `/api` POST with 200 + HTML)
+ * commits that value into `pages` and still reports success. Persisting it is
+ * what turned a one-off bad fetch into a crash on every boot: the JSON round
+ * trip freezes `undefined` into `null`, and the restored entry throws in
+ * `getNextPageParam` during first render — before the post-restore
+ * invalidation can refetch and heal it. Seen in the field as a black screen on
+ * the home route from a poisoned `["recent-changes", …]` entry.
+ *
+ * Every page this app fetches is an object (`IPagination`), so any non-object
+ * entry is corruption, not data. Plain queries (no `pages` array) pass
+ * through untouched.
+ */
+export function isCorruptInfiniteData(data: unknown): boolean {
+  if (typeof data !== "object" || data === null) return false;
+  const pages = (data as { pages?: unknown }).pages;
+  if (!Array.isArray(pages)) return false;
+  return pages.some((page) => typeof page !== "object" || page === null);
 }
 
 /**
  * The predicate handed to `dehydrateOptions.shouldDehydrateQuery`.
  *
- * Two conditions, both required:
+ * Three conditions, all required:
  * 1. the query succeeded — persisting a pending or errored entry would restore
  *    a broken query on the next boot, which is exactly the state offline mode
  *    exists to avoid;
- * 2. its key root is on the allowlist.
+ * 2. its data is not corrupt ({@link isCorruptInfiniteData}) — a poisoned
+ *    entry written once would otherwise crash every later boot;
+ * 3. its key root is on the allowlist.
  */
 export function shouldDehydrateQuery(query: DehydrationCandidate): boolean {
   if (query.state.status !== "success") return false;
+  if (isCorruptInfiniteData(query.state.data)) return false;
   return isPersistableQueryKey(query.queryKey);
+}
+
+/**
+ * The subset of a dehydrated `PersistedClient` the restore-side filter needs.
+ * Structural rather than imported so this module stays dependency-free.
+ */
+interface RestoredClientLike {
+  clientState: {
+    queries: Array<{ state?: { data?: unknown } }>;
+  };
+}
+
+function isRestoredClientLike(value: unknown): value is RestoredClientLike {
+  return Array.isArray(
+    (value as Partial<RestoredClientLike> | null)?.clientState?.queries,
+  );
+}
+
+/**
+ * Drop corrupt entries from a client read back off disk.
+ *
+ * The dehydrate-side check above protects stores written by builds that have
+ * it; this is what heals stores poisoned *before* it existed (the buster used
+ * to never change between fork builds, so those stores were never going to be
+ * discarded on their own). Dropping the whole query rather than the bad page
+ * keeps `pages` and `pageParams` aligned; the cost is one refetch of an entry
+ * that could not be rendered anyway.
+ *
+ * Typed `unknown → unknown` because the input is whatever `JSON.parse`
+ * produced from the store — the caller owns the claim that the result is a
+ * `PersistedClient`. A malformed store must degrade to "restore nothing
+ * extra", never to a throw inside the restore path.
+ */
+export function sanitizeRestoredClient(client: unknown): unknown {
+  if (!isRestoredClientLike(client)) return client;
+  return {
+    ...client,
+    clientState: {
+      ...client.clientState,
+      queries: client.clientState.queries.filter(
+        (query) => !isCorruptInfiniteData(query?.state?.data),
+      ),
+    },
+  };
 }
 
 /**
