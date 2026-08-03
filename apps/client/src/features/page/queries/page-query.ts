@@ -303,7 +303,7 @@ export function useGetSidebarPagesQuery(
     queryFn: ({ pageParam }) => getSidebarPages({ ...data, cursor: pageParam, limit: 100 }),
     initialPageParam: undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.meta?.nextCursor ?? undefined,
+      lastPage?.meta?.nextCursor ?? undefined,
   });
 }
 
@@ -315,7 +315,7 @@ export function useGetRootSidebarPagesQuery(data: SidebarPagesParams) {
     },
     initialPageParam: undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.meta?.nextCursor ?? undefined,
+      lastPage?.meta?.nextCursor ?? undefined,
   });
 }
 
@@ -348,7 +348,7 @@ export function useRecentChangesQuery(spaceId?: string) {
       getRecentChanges({ spaceId, cursor: pageParam, limit: 15 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.meta.hasNextPage ? lastPage.meta.nextCursor : undefined,
+      lastPage?.meta?.hasNextPage ? lastPage.meta.nextCursor : undefined,
     refetchOnMount: true,
   });
 }
@@ -360,7 +360,7 @@ export function useCreatedByQuery(params?: { userId?: string; spaceId?: string }
     queryFn: ({ pageParam }) => getCreatedByPages({ userId, spaceId, cursor: pageParam, limit: 15 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.meta.hasNextPage ? lastPage.meta.nextCursor : undefined,
+      lastPage?.meta?.hasNextPage ? lastPage.meta.nextCursor : undefined,
     refetchOnMount: true,
   });
 }
