@@ -264,7 +264,7 @@ describe("sanitizeRestoredClient", () => {
     const client = {
       clientState: { mutations: [], queries: [bare] },
     };
-    expect(sanitizeRestoredClient(client).clientState.queries).toEqual([bare]);
+    expect(sanitizeRestoredClient(client)).toEqual(client);
   });
 });
 

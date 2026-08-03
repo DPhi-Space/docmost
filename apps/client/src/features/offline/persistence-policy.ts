@@ -1,10 +1,13 @@
 /**
- * What offline persistence is allowed to write, and when.
+ * What offline persistence is allowed to write, when, and what it may read
+ * back.
  *
- * Two decisions, both pure and dependency-free so they can be unit tested
+ * Three decisions, all pure and dependency-free so they can be unit tested
  * exhaustively: which queries may leave memory ({@link shouldDehydrateQuery}),
- * and whether a given snapshot is worth writing at all
- * ({@link isSnapshotWorthPersisting}). `persistence.ts` is the only caller and
+ * whether a given snapshot is worth writing at all
+ * ({@link isSnapshotWorthPersisting}), and which restored entries must be
+ * dropped as corrupt before they reach the query cache
+ * ({@link sanitizeRestoredClient}). `persistence.ts` is the only caller and
  * does nothing but delegate here.
  *
  * The rule is an **allowlist keyed on `queryKey[0]`** — never a denylist. New
@@ -146,10 +149,16 @@ export function shouldDehydrateQuery(query: DehydrationCandidate): boolean {
  * The subset of a dehydrated `PersistedClient` the restore-side filter needs.
  * Structural rather than imported so this module stays dependency-free.
  */
-export interface RestoredClientLike {
+interface RestoredClientLike {
   clientState: {
-    queries: Array<{ state: { data?: unknown } }>;
+    queries: Array<{ state?: { data?: unknown } }>;
   };
+}
+
+function isRestoredClientLike(value: unknown): value is RestoredClientLike {
+  return Array.isArray(
+    (value as Partial<RestoredClientLike> | null)?.clientState?.queries,
+  );
 }
 
 /**
@@ -162,23 +171,22 @@ export interface RestoredClientLike {
  * keeps `pages` and `pageParams` aligned; the cost is one refetch of an entry
  * that could not be rendered anyway.
  *
- * Deliberately defensive about shape: the input is whatever `JSON.parse`
- * produced from the store, and a malformed store must degrade to "restore
- * nothing extra", never to a throw inside the restore path.
+ * Typed `unknown → unknown` because the input is whatever `JSON.parse`
+ * produced from the store — the caller owns the claim that the result is a
+ * `PersistedClient`. A malformed store must degrade to "restore nothing
+ * extra", never to a throw inside the restore path.
  */
-export function sanitizeRestoredClient<T>(client: T): T {
-  const shaped = client as unknown as Partial<RestoredClientLike> | null;
-  const queries = shaped?.clientState?.queries;
-  if (!Array.isArray(queries)) return client;
+export function sanitizeRestoredClient(client: unknown): unknown {
+  if (!isRestoredClientLike(client)) return client;
   return {
-    ...(client as object),
+    ...client,
     clientState: {
-      ...shaped!.clientState,
-      queries: queries.filter(
+      ...client.clientState,
+      queries: client.clientState.queries.filter(
         (query) => !isCorruptInfiniteData(query?.state?.data),
       ),
     },
-  } as T;
+  };
 }
 
 /**

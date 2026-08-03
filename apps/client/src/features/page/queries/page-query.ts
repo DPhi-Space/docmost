@@ -360,7 +360,7 @@ export function useCreatedByQuery(params?: { userId?: string; spaceId?: string }
     queryFn: ({ pageParam }) => getCreatedByPages({ userId, spaceId, cursor: pageParam, limit: 15 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) =>
-      lastPage?.meta?.hasNextPage ? lastPage.meta.nextCursor : undefined,
+      lastPage.meta.hasNextPage ? lastPage.meta.nextCursor : undefined,
     refetchOnMount: true,
   });
 }

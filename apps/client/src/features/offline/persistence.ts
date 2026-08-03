@@ -73,7 +73,7 @@ const storagePersister = createAsyncStoragePersister({
   // a restored infinite query holding a non-object page crashes render before
   // anything can refetch it (see `isCorruptInfiniteData`).
   deserialize: (cached) =>
-    sanitizeRestoredClient(JSON.parse(cached) as PersistedClient),
+    sanitizeRestoredClient(JSON.parse(cached)) as PersistedClient,
 });
 
 /**
