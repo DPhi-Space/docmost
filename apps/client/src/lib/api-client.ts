@@ -44,7 +44,7 @@ api.interceptors.response.use(
     // then persists). Fail the request instead so queries retry.
     if (isHtmlApiResponse(response.headers?.["content-type"], response.data)) {
       return Promise.reject(
-        htmlApiResponseError(response.request?.responseURL),
+        htmlApiResponseError(response.request.responseURL),
       );
     }
 

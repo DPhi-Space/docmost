@@ -9,8 +9,10 @@ WORKDIR /app
 
 # The commit being built. `.git` is excluded from the build context, so the
 # client build cannot ask git itself; the offline query-cache buster needs a
-# value that changes per build (apps/client/vite.config.ts `resolveBuildId`).
-ARG BUILD_ID=dev
+# value that changes per build (features/offline/build/build-id.ts). Default
+# is empty on purpose: build-id.ts treats "" as absent and rotates by build
+# timestamp, so an arg-less build still gets a fresh buster.
+ARG BUILD_ID=""
 ENV BUILD_ID=$BUILD_ID
 
 COPY . .

@@ -218,13 +218,35 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   the home route in `getNextPageParam` ("can't access property 'meta', e is null" — blackscreen)
   before the post-restore invalidation could heal it. Private windows, with no persisted store,
   were immune — that asymmetry is the diagnostic tell. Three companion hardenings from the same
-  incident: the **buster is now `APP_VERSION+APP_BUILD_ID`** (the git SHA, injected via the
-  `BUILD_ID` Docker build arg → `resolveBuildId()` in `vite.config.ts`), because the fork's
-  package version is 0.95.0 on *every* build and a version-only buster never discarded anything;
-  the **api client rejects 2xx HTML answers** (`lib/api-response-guard.ts`), turning a proxy
-  interposition window into ordinary request errors instead of silently-absorbed `undefined`s;
-  and every persisted family's `getNextPageParam` is null-tolerant (`lastPage?.meta?...`), so a
-  store poisoned by an *older* build degrades to a refetch rather than a crash.
+  incident, in decreasing order of load-bearing:
+  - the **buster is now `APP_VERSION+APP_BUILD_ID`** (`features/offline/build/build-id.ts`:
+    `BUILD_ID` build arg → git short SHA → build timestamp, so an arg-less Docker build still
+    rotates), because the fork's package version is 0.95.0 on *every* build and a version-only
+    buster never discarded anything. **Stated cost:** every deploy now discards the whole
+    persisted query cache — one refetch cycle per device per deploy. Offline *edits* are
+    untouched (`page.*` ydocs, dirty registry and outbox are separate databases), but a device
+    that is offline across a deploy boots without its read cache; acceptable against a
+    poisoned store surviving forever, and the same trade `clearOfflineData()` already makes.
+  - the **api client rejects 2xx HTML answers** on non-exempt `/api` endpoints
+    (`lib/api-response-guard.ts`), turning a proxy interposition window into ordinary request
+    errors instead of silently-absorbed `undefined`s. The rejection is a plain `Error` (no
+    `error.response`), so callers reading `error.response?.data?.message` show their generic
+    message and no re-auth is triggered — the app cannot distinguish which proxy answered.
+  - the persisted infinite families' `getNextPageParam` is null-tolerant (`lastPage?.meta?...`)
+    and `useCommentsQuery`'s own page aggregation skips null pages. **Scope, stated honestly:
+    this is defence in depth for the query-observer math, not a render guarantee** — component
+    render paths (`recent-changes.tsx`, `favorites-pages.tsx`, the tree) still dereference
+    `page.items` and would crash on a poisoned entry that reached them; the sanitizer and the
+    HTML rejection are what keep such an entry from existing. Pinned by
+    `poisoned-cache-render.hook.test.tsx`, which mounts the real hooks over the real poison
+    shape — the guards are one-character edits in upstream files, which is exactly what a
+    "take theirs" rebase resolution reverts silently.
+  Upstream-file delta of this fix, for the rebase tally: `page-query.ts` (3 guarded
+  callbacks), `comment-query.ts` (guarded callback + null-skipping aggregation),
+  `favorite-query.ts` (guarded callback), `api-client.ts` (HTML rejection), `vite.config.ts`
+  (define + wiring), `Dockerfile` / `fork-image.yml` / `docker-compose.local.yml` (`BUILD_ID`
+  arg). Non-persisted infinite queries (`pages-created-by-user`, `spaceMembers`, …) keep their
+  upstream unguarded callbacks on purpose — they cannot be poisoned by a restore.
 - **`UserProvider` renders whenever cached user data exists.** Previously it returned an empty
   fragment while `/users/me` was loading or errored, which is why phase 1a booted to a white
   screen. It now blanks only while the cache is still restoring or when there is no user data at
@@ -966,6 +988,10 @@ pages` should never show a populated page collapse to ~100–500 bytes with `tex
 ( cd apps/client && npx vite build )
 test -f apps/client/dist/sw.js                              # must be at the dist ROOT
 grep -c '\.html' apps/client/dist/sw.js                     # must print 0
+grep -oh '0\.95\.0+[A-Za-z0-9]*' apps/client/dist/assets/index-*.js | head -1
+# ^ the query-cache buster: must carry a build id suffix (git SHA locally,
+#   BUILD_ID in CI, timestamp in arg-less Docker builds). A bare version here
+#   means the buster stopped rotating — the poisoned-store condition.
 ```
 
 Then, in a browser against the running container:
