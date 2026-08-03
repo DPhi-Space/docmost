@@ -22,6 +22,7 @@ import { installQueryOnlineManager } from "./online-state";
 import { whenServerReachable } from "./reachability";
 import {
   isSnapshotWorthPersisting,
+  sanitizeRestoredClient,
   shouldDehydrateQuery,
 } from "./persistence-policy";
 
@@ -43,12 +44,21 @@ const PERSIST_THROTTLE_MS = 1_000;
 /**
  * Discard the whole store whenever the client build changes.
  *
- * `APP_VERSION` is a Vite `define`, so it is a compile-time constant in the app
- * and simply absent under vitest — hence the `typeof` guard, which Vite folds to
- * `typeof "0.95.0"` in a real build.
+ * `APP_VERSION` alone is not enough: this fork pins the upstream base, so the
+ * package version is `0.95.0` on *every* fork build and a version-only buster
+ * never fires — which is how a store written by one deploy survived into the
+ * next. `APP_BUILD_ID` (the git SHA, injected at build time; see
+ * `vite.config.ts` and the `BUILD_ID` Docker build arg) changes per build and
+ * restores the intended behaviour.
+ *
+ * Both are Vite `define`s, so they are compile-time constants in the app and
+ * simply absent under vitest — hence the `typeof` guards, which Vite folds to
+ * `typeof "…"` in a real build.
  */
 function cacheBuster(): string {
-  return typeof APP_VERSION === "string" ? APP_VERSION : "dev";
+  const version = typeof APP_VERSION === "string" ? APP_VERSION : "dev";
+  const buildId = typeof APP_BUILD_ID === "string" ? APP_BUILD_ID : "dev";
+  return `${version}+${buildId}`;
 }
 
 const storagePersister = createAsyncStoragePersister({
@@ -59,6 +69,11 @@ const storagePersister = createAsyncStoragePersister({
   // giving up on persistence entirely, drop the least recently updated query and
   // try again — the tail of the cache is the least likely to be wanted offline.
   retry: removeOldestQuery,
+  // Heal stores poisoned before the dehydrate-side corruption check existed:
+  // a restored infinite query holding a non-object page crashes render before
+  // anything can refetch it (see `isCorruptInfiniteData`).
+  deserialize: (cached) =>
+    sanitizeRestoredClient(JSON.parse(cached) as PersistedClient),
 });
 
 /**

@@ -208,6 +208,23 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   Persistence replaces the store wholesale and only successful queries are dehydrated, so a
   session that cannot reach the server would otherwise erase a good offline cache. Measured: one
   reload against an unreachable server left three page entries and no user.
+- **Corrupt infinite-query data is refused on the way to disk *and* dropped on the way back**
+  (`isCorruptInfiniteData` / `sanitizeRestoredClient`), because React Query validates only the
+  *top-level* fetch result against `undefined` — for an infinite query that is the
+  `{pages, pageParams}` wrapper, so a queryFn that resolves `undefined`/`null` for one page
+  commits it silently and still reports success. Observed in production: an office reverse proxy
+  answered `POST /pages/recent` with 200 + HTML, the envelope unwrap (`req.data`) turned it into
+  `undefined`, the persister froze it to `null` (JSON round trip), and every later boot crashed
+  the home route in `getNextPageParam` ("can't access property 'meta', e is null" — blackscreen)
+  before the post-restore invalidation could heal it. Private windows, with no persisted store,
+  were immune — that asymmetry is the diagnostic tell. Three companion hardenings from the same
+  incident: the **buster is now `APP_VERSION+APP_BUILD_ID`** (the git SHA, injected via the
+  `BUILD_ID` Docker build arg → `resolveBuildId()` in `vite.config.ts`), because the fork's
+  package version is 0.95.0 on *every* build and a version-only buster never discarded anything;
+  the **api client rejects 2xx HTML answers** (`lib/api-response-guard.ts`), turning a proxy
+  interposition window into ordinary request errors instead of silently-absorbed `undefined`s;
+  and every persisted family's `getNextPageParam` is null-tolerant (`lastPage?.meta?...`), so a
+  store poisoned by an *older* build degrades to a refetch rather than a crash.
 - **`UserProvider` renders whenever cached user data exists.** Previously it returned an empty
   fragment while `/users/me` was loading or errored, which is why phase 1a booted to a white
   screen. It now blanks only while the cache is still restoring or when there is no user data at

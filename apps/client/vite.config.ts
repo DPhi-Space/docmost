@@ -1,10 +1,35 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "child_process";
 import * as path from "path";
 import { excalidrawAssetsPlugin } from "./src/features/offline/build/excalidraw-assets-plugin";
 import { serviceWorkerPlugin } from "./src/features/offline/build/service-worker-plugin";
 
 const envPath = path.resolve(process.cwd(), "..", "..");
+
+/**
+ * A value that changes with every build, for the offline query-cache buster
+ * (`features/offline/persistence.ts`). The package version cannot serve: this
+ * fork pins the upstream base, so it reads 0.95.0 on every fork build.
+ *
+ * Docker builds have no `.git` in their context (see `.dockerignore`), so CI
+ * passes the commit SHA in as the `BUILD_ID` build arg; local `vite build`
+ * falls back to asking git directly, and "dev" is the last resort.
+ */
+function resolveBuildId(): string {
+  if (process.env.BUILD_ID) return process.env.BUILD_ID;
+  try {
+    return (
+      execSync("git rev-parse --short HEAD", {
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim() || "dev"
+    );
+  } catch {
+    return "dev";
+  }
+}
 
 export default defineConfig(({ mode }) => {
   const {
@@ -35,6 +60,7 @@ export default defineConfig(({ mode }) => {
         POSTHOG_KEY,
       },
       APP_VERSION: JSON.stringify(process.env.npm_package_version),
+      APP_BUILD_ID: JSON.stringify(resolveBuildId()),
     },
     plugins: [
       react(),

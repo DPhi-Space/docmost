@@ -1,5 +1,9 @@
 import axios, { AxiosInstance } from "axios";
 import APP_ROUTE from "@/lib/app-route.ts";
+import {
+  htmlApiResponseError,
+  isHtmlApiResponse,
+} from "@/lib/api-response-guard.ts";
 import { isCloud } from "@/lib/config.ts";
 import { clearOfflineDataOnSessionExpiry } from "@/features/offline/session-expiry";
 import {
@@ -32,6 +36,16 @@ api.interceptors.response.use(
       if (path && exemptEndpoints.includes(path)) {
         return response;
       }
+    }
+
+    // A 2xx that is HTML did not come from the API — an auth proxy or gateway
+    // answered in its place. Unwrapping it would hand every caller `undefined`,
+    // which infinite queries silently commit as a page (and the offline cache
+    // then persists). Fail the request instead so queries retry.
+    if (isHtmlApiResponse(response.headers?.["content-type"], response.data)) {
+      return Promise.reject(
+        htmlApiResponseError(response.request?.responseURL),
+      );
     }
 
     return response.data;
