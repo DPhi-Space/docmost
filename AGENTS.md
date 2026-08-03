@@ -212,7 +212,11 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   (`isCorruptInfiniteData` / `sanitizeRestoredClient`), because React Query validates only the
   *top-level* fetch result against `undefined` — for an infinite query that is the
   `{pages, pageParams}` wrapper, so a queryFn that resolves `undefined`/`null` for one page
-  commits it silently and still reports success. Observed in production: an office reverse proxy
+  commits it silently and still reports success. A page is corrupt unless it is an object
+  carrying an `items` array (an `IPagination`): a proxy's 200 **JSON** error body
+  (`{"message":…}`) is object-shaped, passes the guarded `getNextPageParam`, and crash-loops in
+  the component consumers (`flatMap((p) => p.items)`) exactly like the null case — so the
+  predicate checks the pagination shape, not mere objectness. Observed in production: an office reverse proxy
   answered `POST /pages/recent` with 200 + HTML, the envelope unwrap (`req.data`) turned it into
   `undefined`, the persister froze it to `null` (JSON round trip), and every later boot crashed
   the home route in `getNextPageParam` ("can't access property 'meta', e is null" — blackscreen)

@@ -117,15 +117,25 @@ export interface DehydrationCandidate {
  * invalidation can refetch and heal it. Seen in the field as a black screen on
  * the home route from a poisoned `["recent-changes", …]` entry.
  *
- * Every page this app fetches is an object (`IPagination`), so any non-object
- * entry is corruption, not data. Plain queries (no `pages` array) pass
- * through untouched.
+ * Every page this app fetches is an `IPagination` — an object carrying an
+ * `items` array — so anything else is corruption, not data. The `items` check
+ * is not pedantry: a proxy answering 200 with a JSON body that is not a
+ * pagination (`{"message":"upstream timeout"}`) yields an object-shaped page
+ * that passes a bare object check and the guarded `getNextPageParam`, then
+ * crash-loops in the component consumers (`flatMap((p) => p.items)`) exactly
+ * like the original incident. Plain queries (no `pages` array) pass through
+ * untouched.
  */
 export function isCorruptInfiniteData(data: unknown): boolean {
   if (typeof data !== "object" || data === null) return false;
   const pages = (data as { pages?: unknown }).pages;
   if (!Array.isArray(pages)) return false;
-  return pages.some((page) => typeof page !== "object" || page === null);
+  return pages.some(
+    (page) =>
+      typeof page !== "object" ||
+      page === null ||
+      !Array.isArray((page as { items?: unknown }).items),
+  );
 }
 
 /**
