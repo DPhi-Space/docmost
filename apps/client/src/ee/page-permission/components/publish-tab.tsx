@@ -95,7 +95,9 @@ export function PublishTab({
 
   const sourceSlug = share?.slug ?? "";
   const isCurrentSlugDraft =
-    slugDraft?.shareId === share?.id && slugDraft.sourceSlug === sourceSlug;
+    !!slugDraft &&
+    slugDraft.shareId === share?.id &&
+    slugDraft.sourceSlug === sourceSlug;
   const slugInput = isCurrentSlugDraft ? slugDraft.value : sourceSlug;
   const slugError = isCurrentSlugDraft ? slugDraft.error : null;
 
