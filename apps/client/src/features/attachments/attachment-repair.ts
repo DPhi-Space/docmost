@@ -1,7 +1,12 @@
 /**
- * Pure decision logic for the drawio menu's save path, kept out of the
- * component so it is unit testable without mounting the editor or the
- * `react-drawio` embed.
+ * Pure decision logic for the diagram save paths, shared by the drawio menu
+ * and the Excalidraw save seam (`features/offline/offline-uploads.ts`) and
+ * kept out of both so it is unit testable without mounting an editor or a
+ * diagram embed.
+ *
+ * Both node types overwrite their attachment **in place** on save, which is
+ * what makes a dangling pointer fatal for them and merely cosmetic for images
+ * and other read-only attachments (those just render broken).
  */
 
 /**
@@ -9,8 +14,9 @@
  * not there" — as opposed to a refusal we must report?
  *
  * Copying a page to another space mints a **new** attachment id for every
- * diagram and rewrites the node to it, then copies the files in a best-effort
- * loop whose per-attachment failures are only written to the server log
+ * diagram (both drawio and Excalidraw) and rewrites the node to it, then
+ * copies the files in a best-effort loop whose per-attachment failures are
+ * only written to the server log
  * (`page.service.ts`, upstream `//TODO: best to handle this in a queue`). A
  * copied page can therefore point at an id that was never created, and the
  * server answers the overwrite with 404 `Existing attachment to overwrite not
@@ -31,8 +37,9 @@
  * undefined for every transport-level failure.
  */
 export function isMissingOverwriteTarget(err: unknown): boolean {
-  const response = (err as { response?: { status?: number; data?: { message?: unknown } } })
-    ?.response;
+  const response = (
+    err as { response?: { status?: number; data?: { message?: unknown } } }
+  )?.response;
   const message = String(response?.data?.message ?? "").toLowerCase();
 
   if (response?.status === 404) {

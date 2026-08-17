@@ -40,7 +40,7 @@ import { decodeBase64ToSvgString, svgStringToFile } from "@/lib/utils";
 import { IAttachment } from "@/features/attachments/types/attachment.types";
 import { modals } from "@mantine/modals";
 import { useAltTextControl } from "@/features/editor/components/common/use-alt-text-control.tsx";
-import { isMissingOverwriteTarget } from "./drawio-attachment-repair.ts";
+import { isMissingOverwriteTarget } from "@/features/attachments/attachment-repair.ts";
 import classes from "../common/toolbar-menu.module.css";
 
 /**
@@ -170,71 +170,85 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
     currentAlt: editorState?.alt || "",
   });
 
-  const saveData = useCallback(
-    async (svgXml: string, { isAutosave = false } = {}) => {
-      if (isSavingRef.current) return;
+  const saveData = useCallback(async (svgXml: string) => {
+    if (isSavingRef.current) return;
 
-      isSavingRef.current = true;
-      setIsSaving(true);
+    isSavingRef.current = true;
+    setIsSaving(true);
 
-      try {
-        const svgString = decodeBase64ToSvgString(svgXml);
-        const fileName = "diagram.drawio.svg";
-        const drawioSVGFile = await svgStringToFile(svgString, fileName);
+    try {
+      const svgString = decodeBase64ToSvgString(svgXml);
+      const fileName = "diagram.drawio.svg";
+      const drawioSVGFile = await svgStringToFile(svgString, fileName);
 
-        // @ts-ignore
-        const pageId = editor.storage?.pageId;
-        const attachmentId = editorState?.attachmentId;
+      // @ts-ignore
+      const pageId = editor.storage?.pageId;
+      const attachmentId = editorState?.attachmentId;
 
-        let attachment: IAttachment = null;
-        if (attachmentId) {
-          try {
-            attachment = await uploadFile(drawioSVGFile, pageId, attachmentId);
-          } catch (err) {
-            if (!isMissingOverwriteTarget(err)) throw err;
-            // Repair a dangling pointer instead of failing forever: upload a
-            // fresh attachment and let `updateAttributes` below re-point the
-            // node at it. See `isMissingOverwriteTarget`.
-            attachment = await uploadFile(drawioSVGFile, pageId);
-          }
-        } else {
+      let attachment: IAttachment = null;
+      if (attachmentId) {
+        try {
+          attachment = await uploadFile(drawioSVGFile, pageId, attachmentId);
+        } catch (err) {
+          if (!isMissingOverwriteTarget(err)) throw err;
+          // Repair a dangling pointer instead of failing forever: upload a
+          // fresh attachment and let `updateAttributes` below re-point the
+          // node at it. See `isMissingOverwriteTarget`.
           attachment = await uploadFile(drawioSVGFile, pageId);
         }
-
-        editor.commands.updateAttributes("drawio", {
-          src: `/api/files/${attachment.id}/${attachment.fileName}?t=${new Date(attachment.updatedAt).getTime()}`,
-          title: attachment.fileName,
-          size: attachment.fileSize,
-          attachmentId: attachment.id,
-        });
-
-        isDirtyRef.current = false;
-        autosaveErrorNotifiedRef.current = false;
-      } catch (err) {
-        // A failed save used to be swallowed whole by `.catch(() => {})` at
-        // both call sites: the modal simply sat there, nothing was written,
-        // and the 60 s autosave retried in silence forever. Tell the user.
-        console.error(err);
-        if (!isAutosave || !autosaveErrorNotifiedRef.current) {
-          notifications.show({
-            color: "red",
-            message:
-              (err as any)?.response?.data?.message ||
-              t("The diagram could not be saved. Please try again."),
-          });
-        }
-        // Autosave fires every 60 s while the diagram stays dirty, so it
-        // announces the first failure of a session and then stays quiet; an
-        // explicit save always reports. Reset when a save succeeds or the
-        // modal is reopened.
-        if (isAutosave) autosaveErrorNotifiedRef.current = true;
-        throw err;
-      } finally {
-        isSavingRef.current = false;
-        setIsSaving(false);
+      } else {
+        attachment = await uploadFile(drawioSVGFile, pageId);
       }
+
+      editor.commands.updateAttributes("drawio", {
+        src: `/api/files/${attachment.id}/${attachment.fileName}?t=${new Date(attachment.updatedAt).getTime()}`,
+        title: attachment.fileName,
+        size: attachment.fileSize,
+        attachmentId: attachment.id,
+      });
+
+      isDirtyRef.current = false;
+      autosaveErrorNotifiedRef.current = false;
+    } finally {
+      isSavingRef.current = false;
+      setIsSaving(false);
+    }
+  }, [editor, editorState?.attachmentId]);
+
+  /**
+   * Both call sites used to discard this entirely (`.catch(() => {})`): the
+   * modal sat there, nothing was written, and the 60 s autosave retried in
+   * silence forever. Prefer the server's own message, which names the refusal.
+   */
+  const notifySaveFailed = useCallback(
+    (err: unknown) => {
+      console.error(err);
+      notifications.show({
+        color: "red",
+        message:
+          (err as { response?: { data?: { message?: string } } })?.response?.data
+            ?.message ||
+          t("The diagram could not be saved. Please try again."),
+      });
     },
-    [editor, editorState?.attachmentId, t],
+    [t],
+  );
+
+  /**
+   * Autosave fires every 60 s while the diagram stays dirty, so it reports the
+   * first failure of a session and then stays quiet; an explicit save always
+   * reports. Reset on a successful save and on reopen.
+   */
+  const notifyAutosaveFailed = useCallback(
+    (err: unknown) => {
+      if (autosaveErrorNotifiedRef.current) {
+        console.error(err);
+        return;
+      }
+      autosaveErrorNotifiedRef.current = true;
+      notifySaveFailed(err);
+    },
+    [notifySaveFailed],
   );
 
   const handleClose = useCallback(() => {
@@ -447,12 +461,11 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
                   if (data.parentEvent !== "save") {
                     return;
                   }
-                  // Close only on success — a failed save must keep the modal
-                  // (and the user's drawing) rather than discarding it. The
-                  // error is already reported by `saveData`.
+                  // Close only on success — a failed save must keep the
+                  // modal, and the drawing in it, rather than discarding both.
                   saveData(data.xml)
                     .then(() => close())
-                    .catch(() => {});
+                    .catch(notifySaveFailed);
                 }}
                 onClose={(data: EventExit) => {
                   if (data.parentEvent) {
@@ -464,9 +477,8 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
                   isDirtyRef.current = true;
                 }}
                 onExport={(data: EventExport) => {
-                  // Reached by the 60 s autosave interval below; reported by
-                  // `saveData` on the first failure of a session only.
-                  saveData(data.data, { isAutosave: true }).catch(() => {});
+                  // Reached by the 60 s autosave interval above.
+                  saveData(data.data).catch(notifyAutosaveFailed);
                 }}
               />
             </div>

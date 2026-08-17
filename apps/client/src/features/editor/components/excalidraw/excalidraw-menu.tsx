@@ -30,6 +30,7 @@ import { useTranslation } from "react-i18next";
 import { getFileUrl } from "@/lib/config.ts";
 import {
   notifyDiagramLoadFailed,
+  notifyDiagramSaveFailed,
   saveExcalidrawOrQueue,
 } from "@/features/offline/offline-uploads";
 import { svgStringToFile } from "@/lib";
@@ -60,6 +61,7 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
   const computedColorScheme = useComputedColorScheme();
   const isDirtyRef = useRef(false);
   const isSavingRef = useRef(false);
+  const autosaveErrorNotifiedRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const isInitialLoadRef = useRef(true);
@@ -195,6 +197,7 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
     setIsLoading(false);
     isDirtyRef.current = false;
     isInitialLoadRef.current = true;
+    autosaveErrorNotifiedRef.current = false;
     open();
   }, [editorState?.src, open]);
 
@@ -244,6 +247,7 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
       }
 
       isDirtyRef.current = false;
+      autosaveErrorNotifiedRef.current = false;
     } finally {
       isSavingRef.current = false;
       setIsSaving(false);
@@ -254,8 +258,13 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
     try {
       await saveData();
       close();
-    } catch {
-      // save failed, modal stays open
+    } catch (error) {
+      // The modal stays open — upstream behaviour, and correct, the drawing
+      // must not be discarded — but upstream also said *nothing*, which is
+      // indistinguishable from a save that worked. A dangling attachment id
+      // (a page copied to another space) refuses every save forever.
+      console.error(error);
+      notifyDiagramSaveFailed(error);
     }
   }, [saveData, close]);
 
@@ -287,7 +296,14 @@ export function ExcalidrawMenu({ editor }: EditorMenuProps) {
 
     const interval = setInterval(() => {
       if (isDirtyRef.current && !isSavingRef.current) {
-        saveData().catch(() => {});
+        // Fires every 60 s while the diagram stays dirty, so it reports the
+        // first failure of a session and then stays quiet.
+        saveData().catch((error) => {
+          console.error(error);
+          if (autosaveErrorNotifiedRef.current) return;
+          autosaveErrorNotifiedRef.current = true;
+          notifyDiagramSaveFailed(error);
+        });
       }
     }, 60_000);
 
