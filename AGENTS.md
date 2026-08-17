@@ -1,4 +1,4 @@
-# Fork maintenance guide (Sawii00/docmost)
+# Fork maintenance guide (DPhi-Space/docmost)
 
 This repo is a **fork** of [`docmost/docmost`](https://github.com/docmost/docmost) with a
 small stack of features added on top of a **pinned upstream release tag**. Read this before
@@ -1120,13 +1120,13 @@ also forces `navigator.onLine` to `false` — which is the failure mode's whole 
 ## Deploy (GHCR)
 
 `.github/workflows/fork-image.yml` builds multi-arch (amd64+arm64) and pushes to
-`ghcr.io/sawii00/docmost` on `fork-v*` tags, using the built-in `GITHUB_TOKEN`. Deploy by
+`ghcr.io/dphi-space/docmost` on `fork-v*` tags, using the built-in `GITHUB_TOKEN`. Deploy by
 pinning the immutable tag on the server:
 
 ```yaml
 services:
   docmost:
-    image: ghcr.io/sawii00/docmost:fork-v0.95.0-1   # not `build:`
+    image: ghcr.io/dphi-space/docmost:fork-v0.95.0-1   # not `build:`
 ```
 
 Tag scheme: `fork-v<upstream-base>-<iteration>` (stays clear of upstream's `v*` tags so their

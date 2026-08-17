@@ -4,8 +4,8 @@ name: Fork Image (GHCR)
 #
 # Trigger by pushing a tag like `fork-v0.95.0-1` (base upstream version + fork
 # iteration). The image is published as:
-#   ghcr.io/sawii00/docmost:fork-v0.95.0-1   (immutable, = the git tag)
-#   ghcr.io/sawii00/docmost:fork-latest      (moving, newest fork build)
+#   ghcr.io/dphi-space/docmost:fork-v0.95.0-1   (immutable, = the git tag)
+#   ghcr.io/dphi-space/docmost:fork-latest      (moving, newest fork build)
 #
 # Notes vs upstream release.yml:
 #   - Pushes to GHCR with the built-in GITHUB_TOKEN (no Docker Hub / app-token secrets).
@@ -28,7 +28,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/sawii00/docmost
+  IMAGE: ghcr.io/dphi-space/docmost
 
 jobs:
   build:
