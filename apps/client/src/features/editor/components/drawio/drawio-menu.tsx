@@ -16,6 +16,7 @@ import {
   useComputedColorScheme,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
 import clsx from "clsx";
 import {
   IconLayoutAlignCenter,
@@ -39,7 +40,23 @@ import { decodeBase64ToSvgString, svgStringToFile } from "@/lib/utils";
 import { IAttachment } from "@/features/attachments/types/attachment.types";
 import { modals } from "@mantine/modals";
 import { useAltTextControl } from "@/features/editor/components/common/use-alt-text-control.tsx";
+import { isMissingOverwriteTarget } from "@/features/attachments/attachment-repair.ts";
 import classes from "../common/toolbar-menu.module.css";
+
+/**
+ * Promise wrapper around `FileReader`, so the caller can await the scene
+ * before opening the modal. The callback form let `open()` run first, which
+ * mounted the embed with the *previous* diagram's XML until the read landed.
+ */
+function readAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve((reader.result || "") as string);
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("drawio: could not read the diagram"));
+    reader.readAsDataURL(blob);
+  });
+}
 
 export function DrawioMenu({ editor }: EditorMenuProps) {
   const { t } = useTranslation();
@@ -49,6 +66,7 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
   const computedColorScheme = useComputedColorScheme();
   const isDirtyRef = useRef(false);
   const isSavingRef = useRef(false);
+  const autosaveErrorNotifiedRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -169,7 +187,15 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
 
       let attachment: IAttachment = null;
       if (attachmentId) {
-        attachment = await uploadFile(drawioSVGFile, pageId, attachmentId);
+        try {
+          attachment = await uploadFile(drawioSVGFile, pageId, attachmentId);
+        } catch (err) {
+          if (!isMissingOverwriteTarget(err)) throw err;
+          // Repair a dangling pointer instead of failing forever: upload a
+          // fresh attachment and let `updateAttributes` below re-point the
+          // node at it. See `isMissingOverwriteTarget`.
+          attachment = await uploadFile(drawioSVGFile, pageId);
+        }
       } else {
         attachment = await uploadFile(drawioSVGFile, pageId);
       }
@@ -182,11 +208,48 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
       });
 
       isDirtyRef.current = false;
+      autosaveErrorNotifiedRef.current = false;
     } finally {
       isSavingRef.current = false;
       setIsSaving(false);
     }
   }, [editor, editorState?.attachmentId]);
+
+  /**
+   * Both call sites used to discard this entirely (`.catch(() => {})`): the
+   * modal sat there, nothing was written, and the 60 s autosave retried in
+   * silence forever. Prefer the server's own message, which names the refusal.
+   */
+  const notifySaveFailed = useCallback(
+    (err: unknown) => {
+      console.error(err);
+      notifications.show({
+        color: "red",
+        message:
+          (err as { response?: { data?: { message?: string } } })?.response?.data
+            ?.message ||
+          t("The diagram could not be saved. Please try again."),
+      });
+    },
+    [t],
+  );
+
+  /**
+   * Autosave fires every 60 s while the diagram stays dirty, so it reports the
+   * first failure of a session and then stays quiet; an explicit save always
+   * reports. Reset on a successful save and on reopen.
+   */
+  const notifyAutosaveFailed = useCallback(
+    (err: unknown) => {
+      if (autosaveErrorNotifiedRef.current) {
+        console.error(err);
+        return;
+      }
+      autosaveErrorNotifiedRef.current = true;
+      notifySaveFailed(err);
+    },
+    [notifySaveFailed],
+  );
 
   const handleClose = useCallback(() => {
     if (!isDirtyRef.current) {
@@ -221,22 +284,33 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
         credentials: "include",
         cache: "no-store",
       });
-      const blob = await request.blob();
-
-      const reader = new FileReader();
-      reader.readAsDataURL(blob);
-      reader.onloadend = () => {
-        const base64data = (reader.result || "") as string;
-        setInitialXML(base64data);
-      };
+      // `fetch` rejects only on transport failure: a 404 resolves normally and
+      // `blob()` turns the JSON error body into a perfectly valid-looking
+      // "scene". Without this check a missing attachment reaches drawio as
+      // garbage rather than as a failure.
+      if (!request.ok) {
+        throw new Error(`drawio: scene fetch failed with ${request.status}`);
+      }
+      setInitialXML(await readAsDataUrl(await request.blob()));
     } catch (err) {
+      // Do NOT open on a failed load: this menu only ever opens an EXISTING
+      // diagram (`editorState.src` is required above), so an empty canvas here
+      // is never right — saving from it, or the 60 s autosave, would overwrite
+      // the real drawing with a blank one. Same failure the Excalidraw menu
+      // had (#21); the drawing itself is safe where it is.
       console.error(err);
-    } finally {
+      notifications.show({
+        color: "red",
+        message: t("Could not load the diagram. Please try again."),
+      });
       setIsLoading(false);
-      isDirtyRef.current = false;
-      open();
+      return;
     }
-  }, [editorState?.src, open]);
+    setIsLoading(false);
+    isDirtyRef.current = false;
+    autosaveErrorNotifiedRef.current = false;
+    open();
+  }, [editorState?.src, open, t]);
 
   useEffect(() => {
     if (!opened) return;
@@ -387,7 +461,11 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
                   if (data.parentEvent !== "save") {
                     return;
                   }
-                  saveData(data.xml).then(() => close()).catch(() => {});
+                  // Close only on success — a failed save must keep the
+                  // modal, and the drawing in it, rather than discarding both.
+                  saveData(data.xml)
+                    .then(() => close())
+                    .catch(notifySaveFailed);
                 }}
                 onClose={(data: EventExit) => {
                   if (data.parentEvent) {
@@ -399,7 +477,8 @@ export function DrawioMenu({ editor }: EditorMenuProps) {
                   isDirtyRef.current = true;
                 }}
                 onExport={(data: EventExport) => {
-                  saveData(data.data).catch(() => {});
+                  // Reached by the 60 s autosave interval above.
+                  saveData(data.data).catch(notifyAutosaveFailed);
                 }}
               />
             </div>

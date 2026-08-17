@@ -182,3 +182,131 @@ describe("saveExcalidrawOrQueue — online path against a queued record", () => 
     expect(deleteUploadRecord).toHaveBeenCalledWith("placeholder-id");
   });
 });
+
+describe("saveExcalidrawOrQueue — dangling attachment id", () => {
+  const missingTarget = () =>
+    Object.assign(new Error("Not Found"), {
+      response: {
+        status: 404,
+        data: { message: "Existing attachment to overwrite not found" },
+      },
+    });
+
+  const uploadedAttachment = {
+    id: "new-server-id",
+    fileName: "diagram.excalidraw.svg",
+    fileSize: 6,
+    mimeType: "image/svg+xml",
+    updatedAt: new Date().toISOString(),
+  };
+
+  it("re-uploads as a new attachment and re-points the node", async () => {
+    // The copy-to-space case: the node points at an id the server never
+    // received, so the overwrite can only ever 404. Upstream left the diagram
+    // permanently unsaveable and said nothing.
+    uploadFile
+      .mockRejectedValueOnce(missingTarget())
+      .mockResolvedValueOnce(uploadedAttachment);
+
+    const result = await saveExcalidrawOrQueue({
+      file: svgFile(),
+      pageId: "page-1",
+      attachmentId: "dangling-id",
+    });
+
+    expect(uploadFile).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      "page-1",
+      "dangling-id",
+    );
+    // The retry must not send the dangling id again.
+    expect(uploadFile).toHaveBeenNthCalledWith(2, expect.anything(), "page-1");
+    expect(result.queued).toBe(false);
+    expect(result.attrs?.attachmentId).toBe("new-server-id");
+  });
+
+  it("repairs the 400 twin (an attachment owned by another page)", async () => {
+    uploadFile
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Bad Request"), {
+          response: {
+            status: 400,
+            data: { message: "File attachment does not match" },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(uploadedAttachment);
+
+    const result = await saveExcalidrawOrQueue({
+      file: svgFile(),
+      pageId: "page-1",
+      attachmentId: "other-pages-id",
+    });
+
+    expect(result.attrs?.attachmentId).toBe("new-server-id");
+  });
+
+  it("does not repair a refusal — those still rethrow and keep the record", async () => {
+    readUploadRecord.mockResolvedValue({
+      attachmentId: "real-id",
+      mode: "overwrite",
+      status: "pending",
+    });
+    const refusal = Object.assign(new Error("Forbidden"), {
+      response: { status: 403, data: { message: "Forbidden" } },
+    });
+    uploadFile.mockRejectedValue(refusal);
+
+    await expect(
+      saveExcalidrawOrQueue({
+        file: svgFile(),
+        pageId: "page-1",
+        attachmentId: "real-id",
+      }),
+    ).rejects.toBe(refusal);
+
+    expect(uploadFile).toHaveBeenCalledTimes(1);
+    expect(deleteUploadRecord).not.toHaveBeenCalled();
+  });
+
+  it("still queues on a transport failure rather than forking an attachment", async () => {
+    // `isMissingOverwriteTarget` is checked first, so it must not swallow the
+    // offline case: no `response` at all means the network died, and the save
+    // belongs in the outbox under its existing id.
+    shouldQueueUploadsOffline.mockReturnValue(true);
+    uploadFile.mockRejectedValue(new Error("Network Error"));
+
+    const result = await saveExcalidrawOrQueue({
+      file: svgFile(),
+      pageId: "page-1",
+      attachmentId: "real-id",
+    });
+
+    expect(result.queued).toBe(true);
+    expect(enqueueUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ attachmentId: "real-id", mode: "overwrite" }),
+    );
+  });
+
+  it("deletes a superseded queued record after repairing", async () => {
+    readUploadRecord.mockResolvedValue({
+      attachmentId: "dangling-id",
+      mode: "overwrite",
+      status: "pending",
+    });
+    uploadFile
+      .mockRejectedValueOnce(missingTarget())
+      .mockResolvedValueOnce(uploadedAttachment);
+
+    await saveExcalidrawOrQueue({
+      file: svgFile(),
+      pageId: "page-1",
+      attachmentId: "dangling-id",
+    });
+
+    // The record's id names an attachment that does not exist, so replaying it
+    // could only 404 forever; the drawing it held was just uploaded.
+    expect(deleteUploadRecord).toHaveBeenCalledWith("dangling-id");
+  });
+});

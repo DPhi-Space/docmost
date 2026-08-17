@@ -60,10 +60,71 @@ On top of the `v0.95.0` base:
   (`core/personal-space`), letting a MEMBER own exactly one space (see **Personal spaces** below).
   Unlocks `Feature.PERSONAL_SPACES` in `FORK_ENABLED_FEATURES`. No client changes, no schema
   changes, no permission-model changes.
+- `fix(diagrams): report save failures and repair dangling attachment ids` — see **Dangling
+  diagram attachments** below. Client-only; the upstream-file delta is `drawio-menu.tsx` and
+  `excalidraw-menu.tsx`, plus one new shared module and its test.
 - other commits not mentioned here
 
 With the single, documented exception of #19's 24-line gate patch, none of these touch the
 collaboration/persistence/page-load path — that's what keeps upstream adoption low-conflict.
+
+## Dangling diagram attachments (drawio + Excalidraw)
+
+A diagram node stores a *pointer* (`attachmentId` + `src`), not the drawing, and **both node types
+overwrite that attachment in place on save** — which is what makes a dangling pointer fatal for
+them and merely cosmetic for images and other read-only attachments (those just render broken).
+`ATTACHMENT_NODE_TYPES` covers both, so everything below applies to drawio and Excalidraw alike.
+Two upstream paths leave that pointer aimed at nothing, and upstream reports neither:
+
+- **Copying a page to another space** mints a new attachment id for every diagram, rewrites the
+  node to it, then copies the files in a best-effort loop whose per-attachment failures are only
+  written to the server log (`page.service.ts`, `//TODO: best to handle this in a queue`); it also
+  silently **skips** any attachment whose row `pageId` differs from the source page. Either way
+  the copy points at an id that was never created ⇒ the overwrite answers **404 `Existing
+  attachment to overwrite not found`**.
+- **Copy-pasting a diagram node between pages** leaves the node referencing an attachment owned by
+  the other page ⇒ **400 `File attachment does not match`**.
+
+Note the storage drivers' `copy()` is a **silent no-op when the source is missing**
+(`if (await this.exists(from))` with no else), so a third shape exists — row present, bytes absent.
+That one reads 404 but saves fine, and re-saving repairs it on its own.
+
+Reported as: *"I get this when trying to update a drawio diagram"*, with only a bare 404 in the
+console, because `saveData(...).catch(() => {})` discarded the error at both call sites — the modal
+just sat there and the 60 s autosave retried in silence forever. Excalidraw had the identical
+disease with even less feedback (`handleSaveAndExit`'s `catch {}` kept the modal open and said
+nothing); it is immune only on the **load** side, which #21 already fixed. Its save path does not
+accidentally cover it either: `classifyUploadFailure` maps 404 to `no-access` and
+`shouldQueueAfterFailure` rethrows anything that is not a transport failure — correct, but it
+means a permanently unsaveable diagram.
+
+Three changes, all in the client:
+
+1. **A failed save is reported and keeps the modal open** (`close()` only on success), so the
+   drawing is never discarded. Autosave announces the first failure of a session and then stays
+   quiet; an explicit save always reports.
+2. **A dangling pointer repairs itself**: `isMissingOverwriteTarget`
+   (`features/attachments/attachment-repair.ts` — its own module, shared by both menus and
+   testable without mounting an embed) matches those two server messages *narrowly* and re-uploads
+   as a **new** attachment, re-pointing the node. Nothing is destroyed, the repair is idempotent,
+   and every other refusal — size limit, `Error processing file upload.`, the fork's page lock,
+   any transport failure — still fails loudly instead of quietly forking a second attachment.
+   For Excalidraw the repair lives in `saveExcalidrawOrQueue`'s online branch, beside the two
+   outbox repairs it already performs, and is checked **before** the queue fallback while
+   remaining inert for a transport failure (no `response` ⇒ no repair ⇒ the save queues under its
+   existing id, pinned by test). A superseded queued record is deleted after a repair: its id
+   names an attachment that does not exist, so replaying it could only 404 forever.
+3. **A failed scene load refuses to open the modal** (drawio only — Excalidraw got this in #21).
+   `fetch`
+   rejects only on transport failure, so a 404 resolved and `blob()` turned the JSON error body
+   into a valid-looking "scene"; the response status is now checked. Opening from `finally` handed
+   the user an empty canvas over a real diagram, whose next save or 60 s autosave would overwrite
+   it with a blank one. The `FileReader` is awaited too — `open()` used to run first, mounting the
+   embed with the *previous* diagram's XML.
+
+Not fixed here, deliberately: the server-side copy loop still fails silently, and existing dangling
+pointers stay dangling until someone saves that diagram. Fixing the loop means editing upstream
+server code this fork otherwise leaves alone.
 
 ## MCP write surface (`core/mcp`, issue #15)
 
