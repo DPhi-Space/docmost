@@ -33,6 +33,7 @@ import { formatBytes } from "@/lib";
 import { getFileUploadSizeLimit } from "@/lib/config.ts";
 import { uploadFile } from "@/features/page/services/page-service.ts";
 import type { IAttachment } from "@/features/attachments/types/attachment.types";
+import { isMissingOverwriteTarget } from "@/features/attachments/attachment-repair";
 import { resolveDirtyPageLink } from "./dirty-page-link";
 import {
   insertPendingNode,
@@ -106,7 +107,10 @@ export async function publishUploadOutboxState(): Promise<void> {
 /**
  * Upload an Excalidraw SVG, or queue it when the server cannot be reached.
  *
- * The online path also repairs two queue-related states it can meet:
+ * The online path also repairs a **dangling attachment id** — a node pointing
+ * at an attachment the server never received, which is what a page copied to
+ * another space produces (see `isMissingOverwriteTarget`) — plus two
+ * queue-related states it can meet:
  *
  * - the node's attachment id is a **placeholder** (a diagram created offline
  *   whose replay has not run yet): the id must not reach the server — it names
@@ -128,7 +132,9 @@ export async function saveExcalidrawOrQueue(
   input: SaveExcalidrawInput,
 ): Promise<SaveExcalidrawResult> {
   const attachmentId = input.attachmentId || undefined;
-  const queued = attachmentId ? await readUploadRecord(attachmentId) : undefined;
+  const queued = attachmentId
+    ? await readUploadRecord(attachmentId)
+    : undefined;
   const idIsPlaceholder = queued?.mode === "create";
 
   if (!shouldQueueUploadsOffline()) {
@@ -142,8 +148,31 @@ export async function saveExcalidrawOrQueue(
         await deleteUploadRecord(queued.attachmentId);
         void publishUploadOutboxState();
       }
-      return { queued: false, attrs: excalidrawAttrsFromAttachment(attachment) };
+      return {
+        queued: false,
+        attrs: excalidrawAttrsFromAttachment(attachment),
+      };
     } catch (error) {
+      // A third repair, and the only one that is not about the outbox: the
+      // node points at an attachment the server does not have (a page copied
+      // to another space, whose per-diagram file copy failed silently) or at
+      // one owned by a different page. Upload as a new attachment and let the
+      // caller re-point the node — the same treatment the placeholder branch
+      // above already gets, for the same reason: an id that names nothing on
+      // the server must never be sent again. See `isMissingOverwriteTarget`;
+      // every other refusal falls through and is reported.
+      if (attachmentId && !idIsPlaceholder && isMissingOverwriteTarget(error)) {
+        const attachment = await uploadFile(input.file, input.pageId);
+        if (queued) {
+          await deleteUploadRecord(queued.attachmentId);
+          void publishUploadOutboxState();
+        }
+        return {
+          queued: false,
+          attrs: excalidrawAttrsFromAttachment(attachment),
+        };
+      }
+
       const failure = classifyUploadFailure(error);
       if (!shouldQueueAfterFailure(failure, shouldQueueUploadsOffline())) {
         throw error;
@@ -189,7 +218,9 @@ async function queueExcalidrawSave(
   }
 
   void publishUploadOutboxState();
-  notifyQueued("Drawing saved on this device — it will upload when you're back online.");
+  notifyQueued(
+    "Drawing saved on this device — it will upload when you're back online.",
+  );
 
   return {
     queued: true,
@@ -348,6 +379,32 @@ export function notifyDiagramLoadFailed(): void {
     message: i18n.t(
       "Could not load the diagram — check your connection and try again.",
     ),
+  });
+}
+
+/**
+ * Announce that a diagram could not be saved.
+ *
+ * The save path already reroutes a *transport* failure into the outbox, so
+ * reaching here means the server answered and refused — a locked page, revoked
+ * access, a size limit — or the outbox write itself failed. Upstream showed
+ * nothing at all: `handleSaveAndExit`'s `catch {}` kept the modal open with no
+ * explanation and the 60 s autosave retried in silence, which is how a
+ * permanently unsaveable diagram (a dangling attachment id from a page copied
+ * across spaces) looked like nothing happening at all.
+ *
+ * Prefers the server's own message, which names the actual refusal.
+ */
+export function notifyDiagramSaveFailed(error: unknown): void {
+  const message = (error as { response?: { data?: { message?: unknown } } })
+    ?.response?.data?.message;
+
+  notifications.show({
+    color: "red",
+    message:
+      typeof message === "string" && message
+        ? message
+        : i18n.t("The diagram could not be saved. Please try again."),
   });
 }
 

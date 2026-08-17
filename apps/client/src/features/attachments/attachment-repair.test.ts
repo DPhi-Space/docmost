@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMissingOverwriteTarget } from "./drawio-attachment-repair";
+import { isMissingOverwriteTarget } from "./attachment-repair";
 
 /** Shape of a rejected axios request, as `api-client.ts` re-throws it. */
 function httpError(status: number, message: unknown) {
