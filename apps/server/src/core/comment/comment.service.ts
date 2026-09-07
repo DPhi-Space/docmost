@@ -206,6 +206,63 @@ export class CommentService {
     return comment;
   }
 
+  async resolve(
+    comment: Comment,
+    resolved: boolean,
+    authUser: User,
+  ): Promise<Comment> {
+    // Only a thread's root comment carries the resolved state; the client only
+    // offers the control there, and the Resolved tab groups by root comment.
+    if (comment.parentCommentId) {
+      throw new BadRequestException('You cannot resolve a reply');
+    }
+
+    const now = new Date();
+
+    await this.commentRepo.updateComment(
+      {
+        resolvedAt: resolved ? now : null,
+        resolvedById: resolved ? authUser.id : null,
+        updatedAt: now,
+      },
+      comment.id,
+    );
+
+    // Flip the inline mark in the ydoc so the highlight follows the thread for
+    // every connected client. Best effort: handleYjsEvent is a silent no-op
+    // when COLLAB_DISABLE_REDIS=true, and the resolving client updates its own
+    // document through editor.commands.setCommentResolved regardless.
+    try {
+      await this.collaborationGateway.handleYjsEvent(
+        'resolveCommentMark',
+        `page.${comment.pageId}`,
+        {
+          commentId: comment.id,
+          resolved,
+          user: authUser,
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to update comment mark for comment ${comment.id}`,
+        error,
+      );
+    }
+
+    const updatedComment = await this.commentRepo.findById(comment.id, {
+      includeCreator: true,
+      includeResolvedBy: true,
+    });
+
+    this.wsService.emitCommentEvent(comment.spaceId, comment.pageId, {
+      operation: 'commentResolved',
+      pageId: comment.pageId,
+      comment: updatedComment,
+    });
+
+    return updatedComment;
+  }
+
   private async queueCommentNotification(
     content: any,
     oldMentionIds: string[],

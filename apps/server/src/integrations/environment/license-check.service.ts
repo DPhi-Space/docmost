@@ -25,6 +25,12 @@ import { Feature } from '../../common/features';
 //     UI toggle + the workspace write-gate (workspace.service.ts) both go
 //     through hasFeature('mcp'); the /mcp endpoint enforces space membership
 //     natively via SpaceAbilityFactory.
+//   - COMMENT_RESOLUTION: native resolve endpoint (core/comment). Everything
+//     else already shipped natively: the schema (comments.resolved_at +
+//     resolved_by_id), the repo's withResolvedBy join, the collaboration
+//     handler's resolveCommentMark yjs event, the editor's setCommentResolved
+//     command, the commentResolved websocket event and the whole client UI
+//     (apps/client/src/ee/comment). Only POST /comments/resolve was EE-only.
 //   - PERSONAL_SPACES: native personal-space backend (core/personal-space).
 //     The schema (spaces.is_personal + the one-per-creator unique index),
 //     SpaceService's isPersonal option and the workspace toggle write-gate
@@ -39,6 +45,7 @@ const FORK_ENABLED_FEATURES: string[] = [
   Feature.TEMPLATES,
   Feature.MCP,
   Feature.PERSONAL_SPACES,
+  Feature.COMMENT_RESOLUTION,
 ];
 
 @Injectable()
