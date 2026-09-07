@@ -63,6 +63,10 @@ On top of the `v0.95.0` base:
 - `fix(diagrams): report save failures and repair dangling attachment ids` — see **Dangling
   diagram attachments** below. Client-only; the upstream-file delta is `drawio-menu.tsx` and
   `excalidraw-menu.tsx`, plus one new shared module and its test.
+- `feat: native comment resolution` — the one endpoint the shipped client already calls
+  (`POST /comments/resolve`), letting a commenter resolve and re-open a comment thread (see
+  **Comment resolution** below). Unlocks `Feature.COMMENT_RESOLUTION` in `FORK_ENABLED_FEATURES`.
+  No client changes, no schema changes, no permission-model changes.
 - other commits not mentioned here
 
 With the single, documented exception of #19's 24-line gate patch, none of these touch the
@@ -986,6 +990,47 @@ These are all pre-existing Docmost semantics, kept as-is on purpose:
   user's `space_members` rows but never touches `spaces`, so the space survives with zero members:
   unreachable by everyone and undeletable through any route. Pre-existing for any space, but
   personal spaces make it routine — fix it deliberately, not as a side effect of this feature.
+
+## Comment resolution (`core/comment`)
+
+Marks a comment thread resolved (and re-opens it). Like personal spaces, **almost all of it
+already ships natively in the `v0.95.0` base** — only the endpoint the client posts to was
+EE-only:
+
+- schema: `comments.resolved_at` + `resolved_by_id` (`20250725T052004-add-new-comments-columns.ts`);
+- `CommentRepo.withResolvedBy`, joined by every read path (`includeResolvedBy: true`);
+- `collaboration.handler.ts`'s `resolveCommentMark` yjs event, which flips the inline mark's
+  `resolved` attribute — defined natively and, before this, **called by nothing**;
+- `setCommentResolved` and the resolved mark styling in `packages/editor-ext`;
+- the `commentResolved` websocket event, already handled in `use-query-subscription.ts`;
+- the whole client: `apps/client/src/ee/comment/` (mutation + button), the Active/Resolved tabs in
+  `comment-list-with-tabs.tsx`, and `AuditEvent.COMMENT_RESOLVED` / `COMMENT_REOPENED`.
+
+So the delta is `POST /comments/resolve` (controller + `CommentService.resolve`), the DTO, and the
+flag. **It does not touch the collaboration/persistence path**; it only *calls* the existing
+gateway event, exactly as `CommentService.create` already does for `setCommentMark`.
+
+- **Authorization is `PageAccessService.validateCanComment`** — the same gate as create/update/
+  delete, which folds in space membership, page-level restrictions, the fork's page lock and the
+  viewer-comments toggle. Resolving is not restricted to the thread's author or a space admin:
+  the client gates the control on `canComment` alone, and "anyone in the discussion can close it"
+  is what the UI promises. A comment on a **trashed** page is not resolvable (matching `create`,
+  which is the closest analogue; `update`/`delete` do not check `deletedAt` and are left alone).
+- **Only a thread root is resolvable.** The client offers the control only for
+  `!comment.parentCommentId`, and the Resolved tab groups by root comment, so the server refuses a
+  reply with `BadRequestException` rather than storing a state nothing renders.
+- **The `pageId` the client posts is ignored.** The global `ValidationPipe` runs with
+  `whitelist: true`, so it is stripped from the DTO; the page is resolved from the comment row.
+- **The mark update is best effort.** `handleYjsEvent` is a silent no-op when
+  `COLLAB_DISABLE_REDIS=true` (the same trap documented under **MCP write surface**), and the
+  resolving client updates its own document through `editor.commands.setCommentResolved` either
+  way. The resolved state is the row; the mark is the highlight. A collab failure is logged and
+  the request still succeeds — unlike `McpService.updatePage`, which refuses, because there the
+  ydoc *is* the content being written.
+
+Tests live in `comment-resolve.spec.ts`, a new file: upstream's `comment.service.spec.ts` is a
+never-wired scaffold (`providers: [CommentService]` with no dependencies) that fails on this base
+like a dozen of its siblings, and is deliberately left untouched.
 
 ## Adopting a newer upstream release
 
