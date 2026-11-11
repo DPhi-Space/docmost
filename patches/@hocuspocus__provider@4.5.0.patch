@@ -1,0 +1,51 @@
+diff --git a/dist/hocuspocus-provider.cjs b/dist/hocuspocus-provider.cjs
+index ac672bb2ffec07d750d99b435baa228ee83db738..97bcc40fb909dd6d33a389cb1fa42415b399422b 100644
+--- a/dist/hocuspocus-provider.cjs
++++ b/dist/hocuspocus-provider.cjs
+@@ -234,7 +234,9 @@ var HocuspocusProviderWebsocket = class HocuspocusProviderWebsocket extends Even
+ 	detach(provider) {
+ 		const key = provider.effectiveName;
+ 		if (this.configuration.providerMap.has(key)) {
+-			provider.send(CloseMessage, { documentName: key });
++			// A Close queued on a closed socket would be flushed after the next
++			// provider for this name has authenticated, and close it instead.
++			if (this.webSocket?.readyState === _hocuspocus_common.WsReadyStates.Open) provider.send(CloseMessage, { documentName: key });
+ 			this.configuration.providerMap.delete(key);
+ 		}
+ 	}
+diff --git a/dist/hocuspocus-provider.esm.js b/dist/hocuspocus-provider.esm.js
+index 10fd97cc2410efe586c442ce7c4c6f7602595fa8..ece56317b118c490989395b3eb26f1bede21dd70 100644
+--- a/dist/hocuspocus-provider.esm.js
++++ b/dist/hocuspocus-provider.esm.js
+@@ -204,7 +204,9 @@ var HocuspocusProviderWebsocket = class HocuspocusProviderWebsocket extends Even
+ 	detach(provider) {
+ 		const key = provider.effectiveName;
+ 		if (this.configuration.providerMap.has(key)) {
+-			provider.send(CloseMessage, { documentName: key });
++			// A Close queued on a closed socket would be flushed after the next
++			// provider for this name has authenticated, and close it instead.
++			if (this.webSocket?.readyState === WsReadyStates.Open) provider.send(CloseMessage, { documentName: key });
+ 			this.configuration.providerMap.delete(key);
+ 		}
+ 	}
+diff --git a/src/HocuspocusProviderWebsocket.ts b/src/HocuspocusProviderWebsocket.ts
+index 770670c06bcd41e5d5941e5ceeb97cecdb933961..fdc44fdf9897e2c70051e57bea9c9cbcd21a6895 100644
+--- a/src/HocuspocusProviderWebsocket.ts
++++ b/src/HocuspocusProviderWebsocket.ts
+@@ -246,9 +246,13 @@ export class HocuspocusProviderWebsocket extends EventEmitter {
+ 	detach(provider: HocuspocusProvider) {
+ 		const key = provider.effectiveName;
+ 		if (this.configuration.providerMap.has(key)) {
+-			provider.send(CloseMessage, {
+-				documentName: key,
+-			});
++			// A Close queued on a closed socket would be flushed after the next
++			// provider for this name has authenticated, and close it instead.
++			if (this.webSocket?.readyState === WsReadyStates.Open) {
++				provider.send(CloseMessage, {
++					documentName: key,
++				});
++			}
+ 			this.configuration.providerMap.delete(key);
+ 		}
+ 	}
