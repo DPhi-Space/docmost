@@ -184,6 +184,18 @@ describe("resolveRoute — API paths win over the navigation branch", () => {
     }
   });
 
+  it("passes the OIDC sign-in and logout navigations straight to the network", () => {
+    // Redirect chains through the identity provider; a cached shell or a
+    // cached redirect here would break sign-in or skip the provider logout.
+    for (const path of [
+      "/api/oidc/login?redirect=%2Fhome",
+      "/api/oidc/callback?code=abc&state=def",
+      "/api/oidc/logout",
+    ]) {
+      expect(resolveRoute(nav(path), ORIGIN)).toBe("passthrough");
+    }
+  });
+
   it("keeps a navigation to a path that merely starts with /api safe", () => {
     // `/api/` with the trailing slash is the prefix; `/apiary` is a page.
     expect(resolveRoute(nav("/apiary"), ORIGIN)).toBe("navigation");

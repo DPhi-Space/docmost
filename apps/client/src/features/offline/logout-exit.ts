@@ -42,8 +42,12 @@ export interface LogoutExitDeps {
   serverLogout: () => Promise<unknown>;
   /** The unconditional #18 privacy erase (`clear-offline-data.ts`). */
   clearOfflineData: () => Promise<void>;
-  /** Full-page navigation to the login route. */
-  navigateToLogin: () => void;
+  /**
+   * Full-page navigation away from the app. Told whether the server call
+   * succeeded, so a network-only destination is chosen only when the network
+   * is known to be up.
+   */
+  navigateToLogin: (serverLoggedOut: boolean) => void;
   /** Diagnostic only; a logout must stay quiet in the happy path. */
   log?: (message: string, detail?: unknown) => void;
 }
@@ -58,8 +62,10 @@ export interface LogoutExitDeps {
 export async function performLogoutExit(deps: LogoutExitDeps): Promise<void> {
   const log = deps.log ?? (() => {});
 
+  let serverLoggedOut = false;
   try {
     await deps.serverLogout();
+    serverLoggedOut = true;
   } catch (error) {
     // Transport failure (offline logout) or a server refusal: either way the
     // user is leaving. The server-side session survives until expiry — the
@@ -75,5 +81,5 @@ export async function performLogoutExit(deps: LogoutExitDeps): Promise<void> {
     log("logout: offline cleanup failed", error);
   }
 
-  deps.navigateToLogin();
+  deps.navigateToLogin(serverLoggedOut);
 }

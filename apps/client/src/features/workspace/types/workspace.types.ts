@@ -115,6 +115,7 @@ export interface IPublicWorkspace {
   hostname: string;
   enforceSso: boolean;
   authProviders: IAuthProvider[];
+  oidcEnabled?: boolean;
 }
 
 export interface IVersion {

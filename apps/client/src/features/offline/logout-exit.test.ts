@@ -75,4 +75,28 @@ describe("performLogoutExit", () => {
     expect(serverLogout).toHaveBeenCalledTimes(1);
     expect(order[0]).toBe("server");
   });
+
+  it("tells the navigation the server logout succeeded", async () => {
+    const navigateToLogin = vi.fn();
+    await performLogoutExit({
+      serverLogout: async () => {},
+      clearOfflineData: async () => {},
+      navigateToLogin,
+    });
+    expect(navigateToLogin).toHaveBeenCalledWith(true);
+  });
+
+  it("tells the navigation an offline logout failed, so it stays on an offline-safe page", async () => {
+    const navigateToLogin = vi.fn();
+    await performLogoutExit({
+      serverLogout: async () => {
+        throw Object.assign(new Error("Network Error"), {
+          code: "ERR_NETWORK",
+        });
+      },
+      clearOfflineData: async () => {},
+      navigateToLogin,
+    });
+    expect(navigateToLogin).toHaveBeenCalledWith(false);
+  });
 });

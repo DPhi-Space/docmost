@@ -20,6 +20,7 @@ import { useRedirectIfAuthenticated } from "@/features/auth/hooks/use-redirect-i
 import { useTranslation } from "react-i18next";
 import SsoLogin from "@/ee/components/sso-login.tsx";
 import { AuthLayout } from "./auth-layout.tsx";
+import { OidcLoginButton } from "@/features/oidc/oidc-login-button.tsx";
 
 const formSchema = z.object({
   name: z.string().trim().min(1),
@@ -75,6 +76,7 @@ export function InviteSignUpForm() {
         </Title>
 
         <SsoLogin />
+        <OidcLoginButton />
 
         {!invitation.enforceSso && (
           <Stack align="stretch" justify="center" gap="xl">
