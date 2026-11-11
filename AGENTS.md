@@ -6,21 +6,24 @@ touching the git base, the lockfile, CI, or the collaboration/editor code.
 
 ## ⚠️ The one rule: base on release TAGS, never upstream `main`
 
-The fork's `main` = an upstream **release tag** (currently `v0.95.0`) + our feature commits,
+The fork's `main` = an upstream **release tag** (currently `v0.97.0`) + our feature commits,
 rebased on top. **Do not rebase onto `upstream/main`.**
 
-Why: unreleased upstream `main` shipped a client-side collaboration **data-loss regression** —
-pages wipe their content to empty on navigation/reload (the client overwrites good server
-content with an empty Yjs doc). It came in with the Hocuspocus **v4 collab upgrade**
-(`upstream a55057db`, PR docmost#2351) and the shared-socket refcount it introduced
-(`collab-socket.ts`). Tracked upstream as **docmost#2353**; the accepted fix there is
-"pin to release v0.95.0." We did exactly that via rebase. If you move the base to a commit
-that reintroduces `a55057db` / `collab-socket.ts` before upstream fixes it, the data loss
-returns. Verify with the reproduction below after any base change.
+Why: unreleased upstream `main` can carry regressions no release has fixed yet. It did once: the
+Hocuspocus **v4 collab upgrade** (`upstream a55057db`, PR docmost#2351, with the shared-socket
+refcount in `collab-socket.ts`) made pages wipe their content to empty on navigation/reload
+(**docmost#2353**), and the fork sat on `v0.95.0` until upstream closed it with PR docmost#2373
+("fix: placeholder bug", in v0.96.0/v0.97.0). `v0.97.0` still contains `a55057db` and
+`collab-socket.ts`, so they are no longer the red flag — the reproduction below is. Plain
+`v0.97.0` and the rebased fork were soak-tested with it (two tabs, ~450 sidebar switches, ~140
+typed inserts, hard reloads, offline switch off and on, a DB trigger logging every `pages`
+write): 0 shrinks (smallest write 1355 bytes), every edit persisted, 0 server errors. Not
+covered: long-lived installs with old browser state, real Excalidraw/draw.io diagrams, socket
+drops mid-switch. Run the reproduction after any base change.
 
 ## Our feature commits (the fork's delta)
 
-On top of the `v0.95.0` base:
+On top of the `v0.97.0` base:
 
 - `feat: custom slugs for shared public pages (#4)` — public-share routing + slug migration
 - `feat: D2 diagram rendering (#5)` — client-only, `d2` code-block language (schema-neutral)
@@ -40,9 +43,10 @@ On top of the `v0.95.0` base:
 - `feat(offline): service worker + PWA app shell (#17)`, `persist React Query cache (#18)`,
   `allow editing offline on previously-synced pages (#19)` and `background sync of offline edits
   on reconnect (#20)` — see **Offline/PWA** below. #17/#18/#20 touch nothing on the
-  collaboration path; **#19 is the fork's one deliberate exception**, a 24-line patch to
-  `page-editor.tsx` that must be re-implemented by hand if the base ever moves past upstream's
-  collab rewrite. #20 adds *no further* lines to that patch.
+  collaboration path; **#19 is the fork's one deliberate exception**, a small patch to
+  `page-editor.tsx` (+21 −9) that is re-implemented by hand whenever upstream reshapes that file
+  — done for v0.97.0 in `feat(offline): re-port the offline edit gate onto the shared collab
+  socket (#19)`. #20 adds *no further* lines to that patch.
 - `fix(offline): detect offline by reachability, not navigator.onLine` — the whole of #18–#20
   turned on `navigator.onLine`, which reports `true` with no network at all whenever a VPN
   interface is up, so offline editing did not work on a real deployment. See **Detecting offline**
@@ -67,10 +71,21 @@ On top of the `v0.95.0` base:
   (`POST /comments/resolve`), letting a commenter resolve and re-open a comment thread (see
   **Comment resolution** below). Unlocks `Feature.COMMENT_RESOLUTION` in `FORK_ENABLED_FEATURES`.
   No client changes, no schema changes, no permission-model changes.
+- `fix(mcp): keep the native MCP server on @modelcontextprotocol/sdk v1` — see **MCP write
+  surface** below.
+- `fix(offline): stop a tokenless provider's queued Close from closing the authenticated
+  provider (#19)` — the fork's third vendor patch (`@hocuspocus/provider`); see **Offline
+  editing** below.
+- `fix(editor): do not read a destroyed title editor when saving on navigation` —
+  `title-editor.tsx` `saveTitle` returns early for a destroyed editor. A full page load while the
+  server is unreachable, then in-app navigation, ran the unmount save on a destroyed title editor
+  (`TypeError` reading `'nodes'`) and dropped to the error boundary, switch or no switch. One
+  upstream-file line.
 - other commits not mentioned here
 
-With the single, documented exception of #19's 24-line gate patch, none of these touch the
-collaboration/persistence/page-load path — that's what keeps upstream adoption low-conflict.
+With the single, documented exception of #19's gate patch and its `@hocuspocus/provider` patch,
+none of these touch the collaboration/persistence/page-load path — that's what keeps upstream
+adoption low-conflict.
 
 ## Dangling diagram attachments (drawio + Excalidraw)
 
@@ -164,6 +179,15 @@ Creation uses the web app's split gate (parent page ⇒ edit on the parent; spac
 `create_page` are unaffected — creation writes its ydoc directly in `PageService.create`.
 **The REST API has the identical silent no-op and is left as-is**: fixing it at the gateway would
 mean editing collaboration code, which is the one area this fork keeps untouched.
+
+**SDK version.** `core/mcp` is written against `@modelcontextprotocol/sdk` v1 (`McpServer`,
+`StreamableHTTPServerTransport` on the raw Node request). v0.97.0 replaced it with v2
+`@modelcontextprotocol/server@2.3.1`, which only EE uses, so the fork re-adds `sdk@1.32.1`
+(upstream's last v1) plus the two overrides upstream kept for its transitive deps
+(`express-rate-limit 8.2.2`, `ip-address 10.7.3`). Porting to v2 (already in the tree) means a
+Fastify ↔ web-standard `Request`/`Response` adapter in `mcp.controller.ts` and re-checking the
+tool registration in `mcp.service.ts` — deferred, not rejected. No advisory-database check was
+run on the v1 dependency tree.
 
 ## Offline/PWA (`apps/client/src/features/offline`, issues #17–#20)
 
@@ -290,7 +314,7 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   incident, in decreasing order of load-bearing:
   - the **buster is now `APP_VERSION+APP_BUILD_ID`** (`features/offline/build/build-id.ts`:
     `BUILD_ID` build arg → git short SHA → build timestamp, so an arg-less Docker build still
-    rotates), because the fork's package version is 0.95.0 on *every* build and a version-only
+    rotates), because the fork's package version is the base's (0.97.0) on *every* build and a version-only
     buster never discarded anything. **Stated cost:** every deploy now discards the whole
     persisted query cache — one refetch cycle per device per deploy. Offline *edits* are
     untouched (`page.*` ydocs, dirty registry and outbox are separate databases), but a device
@@ -353,6 +377,12 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
   revoking `POST /api/auth/logout` never reached the server — so the session survives
   server-side until it expires. Everything under the client's control (offline stores, memory,
   the tab itself) is still torn down unconditionally.
+  Upstream (v0.97.0) also calls `deleteLocalPageData()` (`lib/local-page-data.ts`, every `page.*`
+  database) in `handleLogout`; kept, before `performLogoutExit`, and redundant with
+  `clearOfflineData()`. Its other caller, the OAuth consent page's "switch account"
+  (`ee/oauth/pages/oauth-consent.tsx`), runs only that and `logout()`, not `clearOfflineData()`;
+  it is unreachable on the fork today (EE-only endpoint), and sign-in reconciliation would erase
+  a foreign store if it ever ran.
 - **Preserved data must be provably owned, and the readers enforce it themselves**
   (`data-ownership.ts`). The first version of the 401 fix preserved first and settled ownership
   later, from a localStorage note that one cleanup hook consulted — and an audit reached the
@@ -413,26 +443,32 @@ wrapped, never replaced. Three new dependencies (`@tanstack/react-query-persist-
 Phase 2 makes a previously-synced page **editable with no connection**. It is the only part of
 this fork that patches a collaboration-adjacent file, and the patch is deliberately tiny.
 
-**The standing cost, stated plainly.** `apps/client/src/features/editor/page-editor.tsx` is the
-exact file upstream rewrote in the Hocuspocus v4 / `collab-socket.ts` work that produced the
-data-loss regression this fork is pinned away from (docmost#2353, see the top of this file).
-**If the base ever moves onto a release containing that rewrite, this patch will not apply and
-must be re-implemented by hand against the new file** — do not resolve it as a merge conflict
-and hope. Everything else in the feature lives in `features/offline/` and rebases cleanly.
-The patch is 24 lines (`+17 −7`) and consists of exactly four things:
+**The standing cost, stated plainly.** `apps/client/src/features/editor/page-editor.tsx` is
+upstream's collaboration editor, and upstream reshapes it (the Hocuspocus v4 / `collab-socket.ts`
+rewrite landed in v0.96.0). **When it changes shape this patch will not apply and must be
+re-implemented by hand against the new file** — do not resolve it as a merge conflict and hope;
+the v0.97.0 rebase did it as one dedicated commit. Everything else in the feature lives in
+`features/offline/` and rebases cleanly. The patch is `+21 −9` and consists of five things:
 
 1. one import from `features/offline/offline-editing.ts` (a barrel that exists purely so this is
    *one* import statement to re-create);
-2. `useOfflineEditGate({ pageId, providers: providersRef, isLocalSynced, connectionStatus })`;
-3. one widened condition — `showStatic` may also flip false when the gate allows it, in addition
+2. `useMountCollabRoomOffline()` in `PageEditor`: upstream renders the `HocuspocusRoom` only once
+   `collab-token` has loaded, and that query is never persisted, so an offline boot would stay
+   static forever. The room may also mount tokenless (`token={collabQuery?.token}`) while the
+   switch is on, offline data is proven ours and the server is unreachable, latched for the page.
+   The shared socket is only acquired with a token, so nothing connects; when the token arrives
+   the room swaps in an authenticated provider (and a new `Y.Doc`) by itself;
+3. `useEditorOfflineEditGate({ pageId, provider, isLocalSynced, connectionStatus })` in
+   `CollabPageEditor`, with the room's provider;
+4. one widened condition — `showStatic` may also flip false when the gate allows it, in addition
    to the existing first-`Connected`-and-synced path;
-4. `onAuthenticationFailed` now asks `isCollabTokenExpired()` instead of calling
+5. `onAuthenticationFailed` now asks `isCollabTokenExpired()` instead of calling
    `jwtDecode(collabQuery?.token)` (which **throws** on the undefined token an offline boot
    produces, since `collab-token` is deliberately never persisted), and reports a non-expired
    failure instead of swallowing it.
 
-Provider creation/destruction (`providersRef`), `IndexeddbPersistence` usage, and the ydoc are
-untouched. No ydoc is ever seeded from REST content.
+Upstream's room, provider and `IndexeddbPersistence` effect are untouched. No ydoc is ever seeded
+from REST content.
 
 **The invariant.** *A document that has never completed a real remote sync in this browser, and
 is not actually holding content right now, is never editable.* `sync-markers.ts` writes a
@@ -448,18 +484,26 @@ socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table 
   asks the document itself via `Y.encodeStateVector` — a doc nothing has ever been written to
   encodes to a single zero byte. A *synced but empty* page still opens; "never synced" is the
   state being rejected.
-- The gate reads the provider through `providersRef` **itself**, not `providersRef.current`,
-  because the effect that builds the providers runs *after* the render that calls the hook — so
-  a value captured during render is null on the first pass and can be stale afterwards. A
-  destroyed provider still reports `synced === true`, which would mark a page the server never
-  acknowledged. **An earlier version of this note justified the ref by claiming `PageEditor` is
-  not remounted across navigation. That is false** — `pages/page/page.tsx:169` puts
-  `key={page.id}` on the memoized editor — and the code was safe only through React's
-  declaration-order effect execution across two files, an untested cross-file invariant that any
-  move of the hook call or switch to `useLayoutEffect` would have broken silently. The bundle in
-  `providersRef` now carries its own `pageId` and the hook refuses to act unless it matches the
-  page it was asked about, which is a local, tested condition. The hook still holds *which page*
-  is known synced (and which is known populated) rather than a boolean, for the same reason.
+- The gate keeps the provider in its **own ref** (`useEditorOfflineEditGate`, set from a layout
+  effect) and reads it from the timer, because `HocuspocusRoom` replaces its provider — and
+  `Y.Doc` — whenever the token changes, from an effect that runs *after* the editor's, so for one
+  pass the editor still holds the previous one. A destroyed provider still reports
+  `synced === true`, which would mark a page the server never acknowledged. The bundle's `pageId`
+  is read from the provider's own document name (`page.<pageId>`) and the hook refuses to act
+  unless it matches the page it was asked about, a local, tested condition; dirty tracking
+  re-attaches whenever the document changes. The hook still holds *which page* is known synced
+  (and which is known populated) rather than a boolean, for the same reason.
+- **A tokenless provider must not close its successor** (`patches/@hocuspocus__provider@4.5.0.patch`,
+  the fork's **third vendor patch**, pinned to hocuspocus 4.5.0 — rebase or drop it on upgrade).
+  Destroying the tokenless provider calls `detach()`, whose `CloseMessage` is addressed only by
+  document name; on the never-opened shared socket it was queued, flushed after the authenticated
+  provider's Auth, and the server closed *that* provider's document connection — live edits then
+  reached only IndexedDB until the 30 s no-message timeout recycled the socket. The same hit an
+  offline X → Y → X navigation or an expired-token reconnect with the switch off. The patch sends
+  the Close only while the WebSocket is open: a socket that is not open has no server-side
+  document connection left to close. Pinned by `tokenless-provider-close.test.ts` (real provider
+  classes, fake WebSocket). Browser-verified on the final image: a post-reconnect edit reached the
+  server ~0.4 s after a ~20 s outage, same as an online control.
 - The gate also requires that **the server is unreachable** (`reachability.ts`, see **Detecting
   offline** below). Not in the issue's predicate; added so that every behavioural difference is
   confined to sessions that cannot reach the server — an ordinary session takes the same path
@@ -471,13 +515,25 @@ socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table 
 - **Dropped writes are surfaced, never resolved by discarding.** The server marks a connection
   `readOnly` for space READERs, page-level restrictions, **the fork's page lock** and trashed
   pages (`authentication.extension.ts`), then answers each update with `SyncStatus(false)`.
-  Hocuspocus 3.4.4's provider has no `false` branch in `applySyncStatusMessage` — no event, no
-  error — so `unsyncedChanges` never drains and the local doc silently diverges. The provider
+  Hocuspocus's provider (4.5.0, unchanged from 3.4.4) has no `false` branch in
+  `applySyncStatusMessage` — no event, no error — so `unsyncedChanges` never drains and the local
+  doc silently diverges. The provider
   *does* expose the counter as a property, a `hasUnsyncedChanges` getter and an `unsyncedChanges`
   event, but a dropped write produces **no transition**, so the event cannot detect it; only
   elapsed time distinguishes a dropped write from a slow one. `unsynced-changes.ts` therefore
   samples the counter every second and warns after 10 s of a non-draining counter on a live,
-  synced connection. The warning clears only when the counter reaches zero.
+  synced connection. The warning clears only when the counter reaches zero. With upstream's
+  `flushDelay: 500` the counter moves once per flushed batch and the server answers each batch
+  once, so detection is unchanged.
+- **The lock reaches collaboration only through `canUserEditPage`**, which reports a locked page
+  as a restriction the user may read but not edit; v0.97.0's rewritten `getAccess` (checked with
+  `skipCache`) turns that into `readOnly`. Known gap, not applied: v0.97.0 demotes *live*
+  connections on permission changes via `CollabAccessService.recheckAccess`, but
+  `POST /pages/lock` does not call it, so a lock reaches an already-connected writer only on
+  reconnect (same as v0.95.0); the fix is one `recheckAccess({ pageIds })` call in the handler.
+  Test gap: `authentication.extension.page-lock.spec.ts` mocks `canUserEditPage`, and the
+  `is_locked` → synthetic-restriction mapping in `page-permission.repo.ts` has no direct test, so
+  a rebase that resolves that file as "theirs" stays green.
 - **The switch is `localStorage`, default off** (`offline-editing-settings.ts`, key
   `docmost.offline-editing`), not a server-side user preference: the fork makes no
   `apps/server/` changes here, and a setting that gates *offline* behaviour has to be readable
@@ -501,10 +557,10 @@ socket. `canEditWithoutConnection()` is pure and its thirty-two-row truth table 
 
 Known limitations, all documented rather than hidden: the switch also gates the dropped-write
 warning and the title lock, so both bugs remain reachable in their pre-existing form with the
-switch off; and `showStatic` latches globally rather than per page (upstream behaviour), so a
-page never visited before can still show an empty live editor if it is opened *after* an
-offline-editable page in the same session — opening it as the first page of an offline session
-correctly stays static.
+switch off. `showStatic` and its latch now live in `CollabPageEditor`, remounted per page
+(`page.tsx` `key={page.id}`), so the earlier global-latch limitation (a never-visited page opened
+*after* an offline-editable one showing an empty live editor) should no longer apply; only the
+first-page order has been re-verified in a browser.
 
 ### Background sync on reconnect (issue #20)
 
@@ -521,16 +577,21 @@ local edit on a disconnected provider; `resync-manager.ts` walks it one page at 
 - **The origin filter is not optional** (`dirty-tracking.ts`). `y-indexeddb@9.0.12` replays a
   stored document with the `IndexeddbPersistence` **as the transaction origin**
   (`Y.transact(doc, …, idbPersistence, false)`), and `@hocuspocus/provider` applies server
-  updates with the provider as origin. Without excluding both, merely *opening* a page offline
+  updates with the provider as origin (unchanged in 4.5.0). The editor's `IndexeddbPersistence` is
+  created inside upstream's effect and never handed over, so it is excluded by class
+  (`instanceof`). Without excluding both, merely *opening* a page offline
   would mark it dirty — and every page the user only read offline would be queued for a
   background push and, if locked, reported to them as blocked. The rule is stated as an
   exclusion, not as a match on `ySyncPluginKey`, because a missed edit is lost work while a
   spurious record costs one redundant sync.
-- **`resync-session.ts` is a transcription of `page-editor.tsx:138-212`, not a design.** Same
-  construction order, same `attach()`, same teardown order. Inventing a second provider
-  lifecycle is precisely the risk the v0.95.0 pin exists to remove. Its one addition is
-  `ydoc.destroy()` at the end, which the editor does not need (its document dies with the
-  component) and a loop that opens one per page per pass does.
+- **`resync-session.ts` uses a private socket per session, deliberately not the editor's shared
+  one** (`collab-socket.ts`): that socket is refcounted by editors and closed 5 s after the last
+  one, tearing a session down would hit the user's own connection, and v4's `attach()` throws
+  when a socket already holds an authenticated provider for the same document name — exactly when
+  the user navigates into the page being pushed, before the next poll sees the claim.
+  Construction is `Y.Doc` → `IndexeddbPersistence` → socket → provider → `attach()`; teardown is
+  socket, provider, persistence, then `ydoc.destroy()`, which a loop that opens one document per
+  page per pass needs and the editor does not.
 - **`blocked` vs `retry` is the whole judgement**, and the discriminator is whether a handshake
   was observed **on a connection that is still live and synced at the deadline** (issue #35 —
   an earlier version latched the handshake alone, so a socket that died mid-push was reported
@@ -740,9 +801,11 @@ before. Precache interplay, measured: Latin families (25 files, ~0.5 MB) are `op
 entries; the **12 MB Xiaolai CJK family stays out of the manifest entirely** and is
 runtime-CacheFirst via a new `/excalidraw/` asset route (users who draw CJK get the subsets
 cached on first use); `classifyExcalidrawAsset` keeps every font out of required `core`, whose
-small size gates worker activation. Post-#21 the manifest measures **35 core / 81 optional**
-(the pre-#21 measurements elsewhere in this file — 34 core, warm to 90 — are historic values
-from their build).
+small size gates worker activation. Post-#21 the manifest measured **35 core / 81 optional**; on
+the v0.97.0 base it measures **127 core (3.15 MB) / 130 optional (11.71 MB)** — upstream splits
+icons into per-icon chunks, so core has more files but fewer bytes. Every earlier count in this
+file is historic. Upstream's `lazyWithPrefetch` now warms lazy chunks after boot by itself; the
+D2 view stays on plain `lazy` so its 8 MB WASM is not prefetched.
 
 **Durable storage** (`durable-storage.ts`): `navigator.storage.persist()` is requested when the
 switch is turned on and on every boot with it on — and **never with it off, a gate enforced
@@ -847,7 +910,8 @@ periodic timer.
 - **The probe is the fallback, not the signal.** `lib/api-client.ts` reports every axios response
   as reached and every transport-level failure as suspect, and `collab-connection-watch.ts` does
   the same for the collaboration socket — a completed handshake is proof, a drop is only a hint,
-  and it must persist 3 s to count at all because every page navigation rebuilds the provider. An
+  and it must persist 3 s to count at all because the status leaves `Connected` in ordinary use
+  (the editor marks a handshake still pending after 7.5 s `Disconnected`). An
   app in use therefore probes approximately never; the 30 s heartbeat exists solely for an **idle**
   tab, which makes no HTTP requests at all and would otherwise not notice a dead network until the
   user's next click. It is skipped while the tab is hidden and while traffic is flowing.
@@ -867,6 +931,13 @@ recovery like any other offline edit. A session that can reach the API but not t
 WebSocket still stays read-only. And an idle tab now sends one ~200-byte unauthenticated,
 unlogged request every 30 s — deliberately unconditional, like phases 1a/1b, because the verdict
 drives the offline pill and React Query's pausing as well as the editing gate.
+
+Known limitation: after a **long** outage (~35 s measured) a live edit typed in the first seconds
+after the server returns can take up to ~30 s to reach it. The tokenless editor provider cannot
+authenticate; the authenticated one exists only once the `collab-token` query resumes, which is
+paused until the verdict flips, and the idle probe has backed off meanwhile. The offline edits
+themselves flush within seconds (4–5 s measured) and nothing is lost (they are in IndexedDB);
+short outages measured ~0.4–5 s. This is the reachability design (#40), not a regression.
 
 **The one deployment shape to keep in mind**, stated rather than hidden: a reverse proxy that
 forwards `/api/*` but **black-holes** `/api/health/live` specifically — no response at all, not
@@ -945,7 +1016,7 @@ that point our own vim code outweighs the glue.
 Lets a workspace MEMBER own exactly one space of their own. The **only** thing this adds is a
 second way to create a space; everything after creation is an ordinary space.
 
-**Almost all of it already shipped natively in the `v0.95.0` base** — the schema
+**Almost all of it already shipped natively in the upstream base (since `v0.95.0`)** — the schema
 (`spaces.is_personal` + the `spaces_personal_creator_unique` partial index),
 `SpaceRepo.findPersonalSpace`, `SpaceService.createSpace`'s `{ isPersonal }` option, the audit
 entry, the workspace toggle (`settings.spaces.allowPersonal`, licence-gated on
@@ -994,7 +1065,7 @@ These are all pre-existing Docmost semantics, kept as-is on purpose:
 ## Comment resolution (`core/comment`)
 
 Marks a comment thread resolved (and re-opens it). Like personal spaces, **almost all of it
-already ships natively in the `v0.95.0` base** — only the endpoint the client posts to was
+already ships natively in the upstream base (since `v0.95.0`)** — only the endpoint the client posts to was
 EE-only:
 
 - schema: `comments.resolved_at` + `resolved_by_id` (`20250725T052004-add-new-comments-columns.ts`);
@@ -1038,7 +1109,8 @@ like a dozen of its siblings, and is deliberately left untouched.
 git fetch upstream --tags
 # replant our commits from the current base onto the NEW release tag:
 git rebase --onto <new-tag> <current-base-tag> main
-# expected only conflict: pnpm-lock.yaml (see below) — resolve, then:
+# expect pnpm-lock.yaml (see below), small import/registration collisions (keep both
+# sides) and page-editor.tsx (see Offline editing) — resolve, then:
 git rebase --continue
 # verify (below), then:
 git push --force-with-lease origin main
@@ -1049,21 +1121,24 @@ Keep a backup branch before rebasing: `git branch backup/main-pre-<date> main`.
 
 ## Lockfile (pnpm) — read before regenerating
 
-- Package manager is **pinned to `pnpm@10.4.0`** (`package.json` → `packageManager`); the
-  Dockerfile installs that exact version and runs `pnpm install --frozen-lockfile`.
-- The root `package.json` `pnpm.overrides` / `pnpm.patchedDependencies` are **load-bearing**
-  (security/compat pins incl. `y-prosemirror`, `ws`, `dompurify`, a patched `scimmy`). Newer
-  pnpm (11+) warns it ignores the `pnpm` field, but preserves overrides already recorded in an
-  existing lockfile.
-- To resolve a rebase lockfile conflict: reset the file to the base tag's version, then
-  regenerate — this reapplies overrides and adds only our new deps:
+- Package manager is **pinned to `pnpm@11.28.2`** (`package.json` → `packageManager`, upstream's
+  since v0.97.0). The Dockerfile is upstream's (`node:26-slim`, that exact pnpm, a prod install
+  filtered with `--filter '!./apps/client'`) plus the fork's `BUILD_ID` arg.
+- pnpm settings live in **`pnpm-workspace.yaml`** (pnpm 11 ignores the `package.json` `pnpm`
+  field) and are **load-bearing**: `overrides`, `patchedDependencies` (`scimmy`, plus the fork's
+  `vim-prosemirror` and `@hocuspocus/provider` patches), `minimumReleaseAge: 4320` (new versions
+  must be 3 days old) and `allowBuilds`. Take upstream's set and re-add the fork's entries (the
+  two patches, the two MCP SDK overrides). Upstream dropped its `y-prosemirror` override in
+  v0.97.0; the fork did not re-add it.
+- To resolve a rebase lockfile conflict: reset the file to the already-replanted parent, then
+  regenerate — this keeps every earlier resolution and adds only that commit's deps:
   ```bash
-  git checkout <base-tag> -- pnpm-lock.yaml
+  git checkout HEAD -- pnpm-lock.yaml
   pnpm install --lockfile-only
   git add pnpm-lock.yaml && git rebase --continue
   ```
-- Sanity check the result matches the pinned pnpm: `npx pnpm@10.4.0 install --frozen-lockfile`
-  must print "Lockfile is up to date".
+- Sanity check: `pnpm install --frozen-lockfile` must print "Lockfile is up to date".
+  `npx pnpm@10.4.0 …` no longer works (it tries to switch to the `packageManager` version).
 
 ## Private `ee/` submodule
 
@@ -1079,8 +1154,10 @@ gates on the module's absence. Consequences:
 # typecheck
 pnpm --filter "@docmost/editor-ext" build          # build shared workspace pkg first
 ( cd apps/client && npx tsc --noEmit )              # expect 0 errors
-( cd apps/server && npx tsc --noEmit -p tsconfig.json )   # expect 0 errors
+( cd apps/server && npx tsc --noEmit -p tsconfig.json )   # expect 1: upstream's
+#   workspace.service.spec.ts(35,19) TS2554, present on plain v0.97.0
 ( cd apps/client && npx vitest run )                # expect 0 failures
+( cd apps/server && npx jest )   # 16 suites / 15 tests fail on plain v0.97.0 too; compare lists
 
 # end-to-end: rebuild image + boot, then run the repro
 docker compose -f docker-compose.local.yml build docmost
@@ -1098,7 +1175,7 @@ pages` should never show a populated page collapse to ~100–500 bytes with `tex
 ( cd apps/client && npx vite build )
 test -f apps/client/dist/sw.js                              # must be at the dist ROOT
 grep -c '\.html' apps/client/dist/sw.js                     # must print 0
-grep -oh '0\.95\.0+[A-Za-z0-9]*' apps/client/dist/assets/index-*.js | head -1
+grep -oh '0\.97\.0+[A-Za-z0-9]*' apps/client/dist/assets/*.js | head -1
 # ^ the query-cache buster: must carry a build id suffix (git SHA locally,
 #   BUILD_ID in CI, timestamp in arg-less Docker builds). A bare version here
 #   means the buster stopped rotating — the poisoned-store condition.
@@ -1106,21 +1183,24 @@ grep -oh '0\.95\.0+[A-Za-z0-9]*' apps/client/dist/assets/index-*.js | head -1
 
 Then, in a browser against the running container:
 1. Load the app, DevTools → Application → Service Workers: `sw.js` is activated and running.
-   Cache Storage shows `docmost-offline-precache-<version>-<hash>` at 34 entries immediately,
-   growing to 90 as the best-effort warm-up finishes. No `.html` entry may ever appear.
+   Cache Storage shows `docmost-offline-precache-<version>-<hash>` at the core count immediately
+   (127 on v0.97.0), growing to core + optional (257) as the best-effort warm-up finishes. No `.html` entry may ever appear.
 2. `curl -I http://localhost:3000/sw.js` → `content-type: application/javascript` (**not**
    `text/html`) and `cache-control: public, max-age=0` + `ETag`. A `text/html` here means
    `sw.js` was missing from `client/dist` when the server booted.
 3. Open a page containing a mermaid block and one containing a D2 block.
 4. DevTools → Network → Offline, reload: the shell boots from cache with `window.CONFIG` intact
    and no chunk-load errors, **and the app renders** — sidebar tree and previously visited pages
-   come from the persisted query cache (#18). A page never opened online shows the "Page not
-   found" empty state rather than crashing.
+   come from the persisted query cache (#18). A page never opened online shows the "Error
+   fetching page data" empty state rather than crashing.
 5. DevTools → Network → Online: the `/collab` and `/socket.io` WebSockets reconnect normally
    (the worker must never appear in their request chain).
 6. Deploy a newer build, then reload an old tab: the "A new version is available" prompt
    appears, "Reload" activates the waiting worker, and `docmost-offline-precache-*` caches from
    the previous build are gone afterwards. The tab must **not** reload on its own.
+   Consequence for testing: after changing the image an open tab keeps the **old** client until
+   that prompt is accepted — accept it before any A/B or timing test (the F1 symptom under
+   **Offline editing** reproduced on a stale bundle and vanished on the new one).
 
 Since #18 the offline diagram criterion can be checked by hand: open a page with a mermaid block
 and one with a D2 block while online, go offline, reload, and reopen them. Both previews must
@@ -1131,7 +1211,8 @@ classification.
 switch on and once off — the switch must make no difference to it):
 
 1. Settings → Preferences → **Edit pages offline** → on. Open a page online and let it sync.
-2. Go offline (DevTools → Network → Offline). The live editor stays up and a grey "Offline —
+2. Go offline (`docker stop` the app container is the faithful way; DevTools → Network → Offline
+   also forces `navigator.onLine=false`). The live editor stays up and a grey "Offline —
    changes are saved locally…" banner appears. Type in the body, and inside a mermaid/D2 code
    block. The page title must be non-editable with a tooltip.
 3. Reload while still offline: the edits are still there and the editor is still live.
@@ -1141,9 +1222,16 @@ switch on and once off — the switch must make no difference to it):
 5. Lock the page from the other account while the first user edits it offline, then reconnect:
    within ~15 s the orange "Your changes could not be saved to the server" banner appears and
    the local document is untouched. Nothing may ever discard it.
-6. Open a page never visited before as the **first** page of an offline session: it must stay
-   static and read-only.
+6. Open a page never visited before as the **first** page of an offline session: it must not be
+   editable (it shows the "Error fetching page data" empty state).
 7. Switch off ⇒ everything above is inert: static read-only offline, no banners, editable title.
+
+Browser-verified on the v0.97.0 rebase (baseline): an offline edit survives a hard reload while
+the server is down (live editor, grey banner, title locked); reconnect pushes the edits; a locked
+page shows the orange banner and the server refuses the edit, local text untouched; a
+never-visited page opened first offline is not editable; background resync pushes page C while
+the user sits on page D, over its private socket; MCP over `/mcp` lists 12 tools with writes on,
+`update_page` append works, no key ⇒ 401.
 
 **Reachability repro** (the VPN case; DevTools' Offline toggle **cannot** reproduce it, because it
 also forces `navigator.onLine` to `false` — which is the failure mode's whole disguise):
@@ -1171,7 +1259,7 @@ pinning the immutable tag on the server:
 ```yaml
 services:
   docmost:
-    image: ghcr.io/dphi-space/docmost:fork-v0.95.0-1   # not `build:`
+    image: ghcr.io/dphi-space/docmost:fork-v0.97.0-1   # not `build:`
 ```
 
 Tag scheme: `fork-v<upstream-base>-<iteration>` (stays clear of upstream's `v*` tags so their
