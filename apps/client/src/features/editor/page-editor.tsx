@@ -76,7 +76,12 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { extractPageSlugId, platformModifierKey } from "@/lib";
 import { FIVE_MINUTES } from "@/lib/constants.ts";
 import { PageEditMode } from "@/features/user/types/user.types.ts";
-import { jwtDecode } from "jwt-decode";
+import {
+  isCollabTokenExpired,
+  reportPageUnavailable,
+  useEditorOfflineEditGate,
+  useMountCollabRoomOffline,
+} from "@/features/offline/offline-editing";
 import { searchSpotlight } from "@/features/search/constants.ts";
 import { useEditorScroll } from "./hooks/use-editor-scroll";
 import { EditorAiMenu } from "@/ee/ai/components/editor/ai-menu/ai-menu";
@@ -117,6 +122,7 @@ export default function PageEditor({
   const slugId = extractPageSlugId(pageSlug);
   const [socket] = useState(getCollabSocket);
   const hasCollabToken = !!collabQuery?.token;
+  const mountRoomOffline = useMountCollabRoomOffline();
 
   useEffect(() => {
     if (!hasCollabToken) return;
@@ -169,9 +175,8 @@ export default function PageEditor({
   };
 
   const handleAuthenticationFailed = () => {
-    const payload = jwtDecode(collabQuery?.token);
-    const now = Date.now().valueOf() / 1000;
-    const isTokenExpired = now >= payload.exp;
+    const isTokenExpired = isCollabTokenExpired(collabQuery?.token);
+    if (!isTokenExpired) reportPageUnavailable(pageId);
     if (isTokenExpired) {
       refetchCollabToken();
     }
@@ -179,11 +184,11 @@ export default function PageEditor({
 
   return (
     <TransclusionLookupProvider>
-      {collabQuery?.token ? (
+      {collabQuery?.token || mountRoomOffline ? (
         <HocuspocusProviderWebsocketComponent websocketProvider={socket}>
           <HocuspocusRoom
             name={`page.${pageId}`}
-            token={collabQuery.token}
+            token={collabQuery?.token}
             flushDelay={500}
             onStateless={handleStateless}
             onAuthenticationFailed={handleAuthenticationFailed}
@@ -495,6 +500,13 @@ function CollabPageEditor({
   const hasConnectedOnceRef = useRef(false);
   const [showStatic, setShowStatic] = useState(true);
 
+  const { canEditOffline } = useEditorOfflineEditGate({
+    pageId,
+    provider,
+    isLocalSynced,
+    connectionStatus: yjsConnectionStatus,
+  });
+
   useSearchNavigationParams({
     editor,
     isSynced,
@@ -506,13 +518,13 @@ function CollabPageEditor({
   useEffect(() => {
     if (
       !hasConnectedOnceRef.current &&
-      yjsConnectionStatus === WebSocketStatus.Connected &&
-      isSynced
+      ((yjsConnectionStatus === WebSocketStatus.Connected && isSynced) ||
+        canEditOffline)
     ) {
       hasConnectedOnceRef.current = true;
       setShowStatic(false);
     }
-  }, [yjsConnectionStatus, isSynced]);
+  }, [yjsConnectionStatus, isSynced, canEditOffline]);
 
   if (showStatic) {
     return <StaticPageEditor content={content} ariaLabel={t("Page content")} />;

@@ -54,7 +54,7 @@
  *   same signal the dropped-write detector below already samples.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { WebSocketStatus } from "@hocuspocus/provider";
 import { useOnlineStatus } from "./online-state";
 import { useOfflineEditingEnabled } from "./offline-editing-settings";
@@ -148,7 +148,8 @@ export interface RemoteSyncSource {
 }
 
 /**
- * The bundle `page-editor.tsx` keeps in `providersRef`.
+ * What the gate knows about the editor's provider (built by
+ * {@link useEditorOfflineEditGate}).
  *
  * `pageId` is the important field. Everything this hook does — writing a sync
  * marker, recording a dirty page, clearing one — is a statement *about a
@@ -157,11 +158,11 @@ export interface RemoteSyncSource {
  * assumption about React's scheduling into a comparison this file can make and
  * a test can break.
  *
- * `local` is needed purely as an update *origin* to exclude (the y-indexeddb
- * replay); it is never called.
+ * `local`, when present, is only an update *origin* to exclude; the editor's
+ * y-indexeddb instance is recognised by class instead (`dirty-tracking.ts`).
  */
 export interface PageProviders {
-  /** The page these providers were constructed for (`page-editor.tsx:140`). */
+  /** The page the provider was constructed for, read from its document name. */
   pageId?: string;
   remote: RemoteSyncSource;
   local?: unknown;
@@ -170,23 +171,15 @@ export interface PageProviders {
 export interface UseOfflineEditGateInput {
   pageId: string;
   /**
-   * `page-editor.tsx`'s `providersRef` itself, not `providersRef.current`.
+   * A ref to the provider bundle, read inside the timer rather than captured.
    *
-   * The ref is the only always-current handle on the provider: the effect that
-   * builds the providers runs *after* the render that calls this hook, so a
-   * value captured during render is null on the first pass and can be stale
-   * afterwards. Reading through the ref inside the timer is what makes it
-   * current.
-   *
+   * `HocuspocusRoom` replaces its provider (and with it the `Y.Doc`) whenever
+   * the token changes, and does so in an effect that runs *after* the editor's
+   * own effects — so for one pass the editor still holds the previous provider.
    * A previous, *destroyed* provider still reports `synced === true`, so acting
    * on the wrong one would write a sync marker for a page the server never
-   * acknowledged. Earlier revisions of this comment justified the ref by
-   * asserting that `PageEditor` is not remounted across navigation. **That is
-   * false** — `pages/page/page.tsx:169` puts `key={page.id}` on the memoized
-   * editor, so it is remounted per page — and the code was in fact safe only
-   * because of React's declaration-order effect execution across two files.
-   * That is not an invariant worth depending on, so the bundle now carries its
-   * own `pageId` and everything below refuses to act unless it matches.
+   * acknowledged. The bundle therefore carries its own `pageId` and everything
+   * below refuses to act unless it matches.
    */
   providers: { current: PageProviders | null } | null;
   /** y-indexeddb finished loading. */
@@ -281,7 +274,11 @@ export function useOfflineEditGate({
   }, [isConnected]);
 
   /** The dirty-edit subscription, which follows the provider, not the render. */
-  const trackingRef = useRef<{ pageId: string; stop: () => void } | null>(null);
+  const trackingRef = useRef<{
+    pageId: string;
+    doc: DocUpdateSource;
+    stop: () => void;
+  } | null>(null);
   useEffect(() => {
     maybeDirtyRef.current = true;
     return () => {
@@ -332,15 +329,20 @@ export function useOfflineEditGate({
        */
       if (bundle.pageId !== pageId) return;
 
-      // Attached from the tick rather than from an effect because the effect
-      // that creates the providers runs after this hook's, so there is no
-      // render that reliably coincides with a live provider for this page.
-      if (trackingRef.current?.pageId !== pageId && provider.document) {
+      // Attached from the tick, and re-attached whenever the document changes:
+      // a token refresh gives the page a new provider *and* a new `Y.Doc`.
+      const doc = provider.document;
+      if (
+        doc &&
+        (trackingRef.current?.pageId !== pageId ||
+          trackingRef.current.doc !== doc)
+      ) {
         trackingRef.current?.stop();
         trackingRef.current = {
           pageId,
+          doc,
           stop: trackDirtyEdits({
-            doc: provider.document,
+            doc,
             ignoredOrigins: () => [
               providers?.current?.local,
               providers?.current?.remote,
@@ -437,4 +439,68 @@ export function useOfflineEditGate({
   );
 
   return { canEditOffline };
+}
+
+/** The slice of the editor's `HocuspocusProvider` the gate reads. */
+export interface EditorProvider extends RemoteSyncSource {
+  readonly configuration: { readonly name: string };
+}
+
+const PAGE_DOCUMENT_PREFIX = "page.";
+
+/**
+ * The bundle for the provider `HocuspocusRoom` handed the editor. Its `pageId`
+ * comes from the provider's own document name, so it is evidence about the
+ * provider rather than a copy of the prop it is compared against.
+ */
+export function editorProviderBundle(provider: EditorProvider): PageProviders {
+  const name = provider.configuration.name;
+  return {
+    pageId: name.startsWith(PAGE_DOCUMENT_PREFIX)
+      ? name.slice(PAGE_DOCUMENT_PREFIX.length)
+      : undefined,
+    remote: provider,
+  };
+}
+
+/** {@link useOfflineEditGate} for the provider `page-editor.tsx` gets from `useHocuspocusProvider()`. */
+export function useEditorOfflineEditGate({
+  provider,
+  ...input
+}: Omit<UseOfflineEditGateInput, "providers"> & {
+  provider: EditorProvider;
+}): OfflineEditGate {
+  const providersRef = useRef<PageProviders | null>(null);
+  // A layout effect runs before every passive effect of the same commit, so
+  // the gate's first tick already sees this render's provider.
+  useLayoutEffect(() => {
+    providersRef.current = editorProviderBundle(provider);
+  }, [provider]);
+  return useOfflineEditGate({ ...input, providers: providersRef });
+}
+
+/**
+ * May `page-editor.tsx` mount the collaboration room before it has a token?
+ *
+ * Upstream renders the room only once `collab-token` has loaded, and that query
+ * is never persisted (it is a live JWT), so a tab booted or reloaded offline
+ * would show the static editor forever. Mounting the room without a token gives
+ * the gate a provider and y-indexeddb to work with; the shared socket is only
+ * acquired once a token exists, so nothing connects. Only while the server is
+ * unreachable, so an online session takes upstream's path unchanged.
+ *
+ * Latched for the life of the page, like the gate: reconnecting must not
+ * unmount a live editor from under the user. When the token arrives the room
+ * swaps in an authenticated provider on its own.
+ */
+export function useMountCollabRoomOffline(): boolean {
+  const featureEnabled = useOfflineEditingEnabled();
+  const isOnline = useOnlineStatus();
+  const offlineDataIsOurs = useOfflineDataIsOurs();
+  const wanted = featureEnabled && offlineDataIsOurs && !isOnline;
+  const [latched, setLatched] = useState(false);
+  useEffect(() => {
+    if (wanted) setLatched(true);
+  }, [wanted]);
+  return wanted || latched;
 }

@@ -12,10 +12,14 @@
  *   **is the `IndexeddbPersistence` instance**. Without the filter, simply
  *   *opening* a page offline would replay its whole history and mark it dirty,
  *   and every page the user merely read offline would be queued for a resync —
- *   and, if it happened to be locked, reported to them as blocked.
- * - `@hocuspocus/provider@3.4.4` applies server updates with the provider as
- *   the origin (`readSyncMessage(…, provider)`), which is also why its own
- *   `documentUpdateHandler` starts with `if (origin === this) return`.
+ *   and, if it happened to be locked, reported to them as blocked. The editor's
+ *   instance is created inside upstream's `page-editor.tsx` effect and is not
+ *   handed to this module, so any `IndexeddbPersistence` origin is excluded by
+ *   class; y-indexeddb is the only thing that uses one as an origin.
+ * - `@hocuspocus/provider@4.5.0` (unchanged from 3.4.4) applies server updates
+ *   with the provider as the origin (`readSyncMessage(…, provider)`), which is
+ *   also why its own `documentUpdateHandler` starts with
+ *   `if (origin === this) return`.
  *
  * Everything else is a local edit. `y-prosemirror` commits editor changes with
  * `ySyncPluginKey` as the origin, but the rule here is stated as an exclusion
@@ -35,6 +39,8 @@
  * it — the entry is cleared as soon as the counter drains.
  */
 
+import { IndexeddbPersistence } from "y-indexeddb";
+
 /** The slice of `Y.Doc` this module needs. */
 export interface DocUpdateSource {
   on(event: "update", handler: (update: Uint8Array, origin: unknown) => void): void;
@@ -45,14 +51,14 @@ export interface DocUpdateSource {
  * Is this update the user editing, rather than a replay from disk or from the
  * server?
  *
- * `ignoredOrigins` holds the `IndexeddbPersistence` and the `HocuspocusProvider`
- * for this document. Nullish entries are ignored so a caller that has only one
- * of the two still gets the other's protection.
+ * `ignoredOrigins` holds the `HocuspocusProvider` for this document (and, if the
+ * caller has it, the `IndexeddbPersistence`). Nullish entries are ignored.
  */
 export function isLocalEditOrigin(
   origin: unknown,
   ignoredOrigins: readonly unknown[],
 ): boolean {
+  if (origin instanceof IndexeddbPersistence) return false;
   return !ignoredOrigins.some(
     (ignored) => ignored != null && origin === ignored,
   );

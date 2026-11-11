@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { IndexeddbPersistence } from "y-indexeddb";
 import {
   isLocalEditOrigin,
   trackDirtyEdits,
@@ -28,6 +29,14 @@ describe("isLocalEditOrigin", () => {
 
   it("rejects the y-indexeddb replay, which uses the persistence as its origin", () => {
     expect(isLocalEditOrigin(persistence, [persistence, provider])).toBe(false);
+  });
+
+  it("rejects any y-indexeddb instance, even one the caller does not hold", () => {
+    // The editor creates its persistence inside upstream's page-editor.tsx
+    // effect and never hands it over; constructing one needs IndexedDB, so
+    // only the prototype is borrowed.
+    const editorPersistence = Object.create(IndexeddbPersistence.prototype);
+    expect(isLocalEditOrigin(editorPersistence, [provider])).toBe(false);
   });
 
   it("rejects an update applied by the collaboration provider", () => {

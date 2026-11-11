@@ -59,7 +59,7 @@ import { clearDirtyPages } from "./dirty-pages";
 import { clearUploadOutbox } from "./upload-outbox";
 import { forgetOfflineDataOwner } from "./owner-hint";
 
-/** y-indexeddb database name for a page, mirroring `page-editor.tsx:136`. */
+/** y-indexeddb database name for a page: the editor's room name, `page.<pageId>`. */
 const PAGE_DB_PREFIX = "page.";
 
 /** Precaches hold build output only — see {@link runtimeCachesToDelete}. */

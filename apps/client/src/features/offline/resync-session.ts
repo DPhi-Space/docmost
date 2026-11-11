@@ -1,22 +1,28 @@
 /**
  * A short-lived collaboration session for a page nobody is looking at.
  *
- * This is the only file in phase 3 that constructs Yjs and Hocuspocus objects,
- * and it is a **transcription** of `page-editor.tsx:138-212`, not a design:
- * same document name, same construction order (`Y.Doc` → `IndexeddbPersistence`
- * → `HocuspocusProviderWebsocket` → `HocuspocusProvider` → `attach()`), same
- * teardown order (socket, provider, persistence). The fork is pinned to
- * v0.95.0 precisely because upstream's rewrite of that lifecycle lost content
- * (docmost#2353, see AGENTS.md); inventing a second lifecycle here would
- * reintroduce the risk the pin exists to remove, in a code path with no user
- * watching it.
+ * This is the only file in phase 3 that constructs Yjs and Hocuspocus objects.
+ * It uses the same pieces as the editor — a `page.<pageId>` document, its
+ * y-indexeddb database and a `HocuspocusProvider` attached to an external
+ * socket — but deliberately **not** the editor's shared socket
+ * (`features/editor/collab-socket.ts`). That socket belongs to the editor:
+ * it is refcounted by mounted editors and closed 5 s after the last one goes,
+ * so a background push would either have to hold it open or race its release;
+ * tearing the session down would have to avoid `disconnect()`/`destroy()` on a
+ * connection the user's editor is using; and Hocuspocus 4 throws from
+ * `attach()` when a socket already carries an authenticated provider for the
+ * same document name — which is exactly the moment the user navigates into the
+ * page being pushed, before the manager's next poll notices the claim. A
+ * private socket per session costs one extra WebSocket while a page is pushed
+ * and avoids all three.
  *
- * The one addition is `ydoc.destroy()` after the persistence, which
- * `page-editor.tsx` has no need for — its document dies with the component,
- * whereas a background loop that opens one per page per pass would accumulate
- * them for the life of the tab. It runs last, after `local.destroy()` has
- * already removed its own `doc.on("destroy")` handler, so nothing is torn down
- * twice.
+ * Construction order is `Y.Doc` → `IndexeddbPersistence` →
+ * `HocuspocusProviderWebsocket` → `HocuspocusProvider` → `attach()`; teardown is
+ * socket, provider, persistence, then `ydoc.destroy()`, which the editor has no
+ * need for — its document dies with the provider — whereas a background loop
+ * that opens one per page per pass would accumulate them for the life of the
+ * tab. It runs last, after `local.destroy()` has already removed its own
+ * `doc.on("destroy")` handler, so nothing is torn down twice.
  *
  * Nothing here reads or writes the document's content. The offline edits are
  * pushed by the sync protocol itself: the client answers the server's SyncStep1
@@ -45,7 +51,7 @@ import * as Y from "yjs";
 import { getCollaborationUrl } from "@/lib/config";
 import type { ResyncSession } from "./resync-page";
 
-/** Mirrors `page-editor.tsx:140`; also the y-indexeddb database name. */
+/** The editor's room name for the page; also the y-indexeddb database name. */
 export function pageDocumentName(pageId: string): string {
   return `page.${pageId}`;
 }
@@ -91,7 +97,7 @@ export interface ResyncSessionDeps {
 }
 
 /**
- * The real classes, in the order and with the arguments `page-editor.tsx` uses.
+ * The real classes.
  * The casts are at the boundary only: the structural interfaces above describe
  * a subset of each class, and every object handed across is the genuine one.
  */
@@ -162,9 +168,8 @@ export async function openResyncSession(
       },
     });
 
-    // Same call, same reason as `page-editor.tsx:237` — the provider does not
-    // manage its own socket when one is supplied, so nothing connects until it
-    // is attached.
+    // A provider given an external socket does not attach itself (the editor's
+    // `HocuspocusRoom` does the same in an effect), so nothing syncs until this.
     remote.attach();
 
     const provider = remote;

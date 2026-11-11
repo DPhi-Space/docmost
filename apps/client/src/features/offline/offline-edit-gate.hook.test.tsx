@@ -7,13 +7,14 @@
  * precisely the hazard the design exists to defeat, so the suite could not fail
  * for the one reason that matters.
  *
- * What `page-editor.tsx` really does:
+ * What the editor really does (`useEditorOfflineEditGate` over
+ * `HocuspocusRoom`'s provider):
  *
- * - `providersRef` is **one stable object** for the life of the component; only
- *   `.current` moves;
- * - `.current` is swapped from an **effect**, i.e. out of band and after the
- *   render that reads it — so the ref is null on the first pass and lags a
- *   `pageId` change;
+ * - the providers ref is **one stable object** for the life of the component;
+ *   only `.current` moves;
+ * - `HocuspocusRoom` replaces its provider — and `Y.Doc` — from an **effect**
+ *   that runs after the editor's, so `.current` can lag a `pageId` change and
+ *   is replaced again when the token changes;
  * - `connectionStatus` comes from the global `yjsConnectionStatusAtom`, which is
  *   **never reset** when the page changes, so a new page inherits the old page's
  *   `Connected`;
@@ -58,6 +59,9 @@ import {
   resetOwnershipForTests,
 } from "./data-ownership";
 import {
+  editorProviderBundle,
+  useEditorOfflineEditGate,
+  useMountCollabRoomOffline,
   useOfflineEditGate,
   UNSYNCED_POLL_MS,
   type PageProviders,
@@ -72,6 +76,7 @@ import {
   useOfflineEditState,
 } from "./offline-edit-state";
 import { UNSYNCED_GRACE_MS } from "./unsynced-changes";
+import { useOnlineStatus } from "./online-state";
 
 function setOnline(online: boolean) {
   Object.defineProperty(window.navigator, "onLine", {
@@ -740,6 +745,27 @@ describe("useOfflineEditGate — dirty tracking", () => {
     expect(recordDirtyPage).not.toHaveBeenCalled();
   });
 
+  it("follows the new document when the room replaces the provider", async () => {
+    // HocuspocusRoom builds a new provider, with a new Y.Doc, whenever the
+    // token changes — e.g. when it finally arrives after an offline boot.
+    vi.useFakeTimers();
+    setOfflineEditingEnabled(true);
+    const first = bundleFor("page-1");
+    const providers = providersRef(first.bundle);
+
+    mountGate(providers);
+    await settle();
+
+    const second = bundleFor("page-1");
+    providers.current = second.bundle;
+    await tick();
+    act(() => emitUpdate(first.doc, editorOrigin));
+    act(() => emitUpdate(second.doc, editorOrigin));
+
+    expect(recordDirtyPage).toHaveBeenCalledTimes(1);
+    expect(recordDirtyPage).toHaveBeenCalledWith("page-1", undefined);
+  });
+
   it("unsubscribes when the editor unmounts", async () => {
     setOfflineEditingEnabled(true);
     const { bundle, doc } = bundleFor("page-1");
@@ -781,5 +807,108 @@ describe("useOfflineEditGate — open-document claim", () => {
     unmount();
 
     expect(getOpenPage()).toBeNull();
+  });
+});
+
+/** The provider as `useHocuspocusProvider()` hands it to the editor. */
+function editorProvider(documentName: string, options: BundleOptions = {}) {
+  const { bundle } = bundleFor("unused", options);
+  return { ...bundle.remote, configuration: { name: documentName } };
+}
+
+describe("useEditorOfflineEditGate — the editor's provider", () => {
+  beforeEach(reset);
+  afterEach(() => setOnline(true));
+
+  it("reads the page from the provider's own document name", () => {
+    expect(editorProviderBundle(editorProvider("page.abc")).pageId).toBe("abc");
+    expect(editorProviderBundle(editorProvider("other")).pageId).toBeUndefined();
+  });
+
+  it("opens for the provider of the page it is asked about", async () => {
+    await ownershipSettled();
+    setOfflineEditingEnabled(true);
+    markers.set("page-1", 1);
+    setOnline(false);
+
+    const { result } = renderHook(() =>
+      useEditorOfflineEditGate({
+        pageId: "page-1",
+        provider: editorProvider("page.page-1"),
+        isLocalSynced: true,
+        connectionStatus: "disconnected",
+      }),
+    );
+    await settle();
+
+    expect(result.current.canEditOffline).toBe(true);
+  });
+
+  it("refuses a provider that belongs to another page", async () => {
+    await ownershipSettled();
+    setOfflineEditingEnabled(true);
+    markers.set("page-2", 1);
+    setOnline(false);
+
+    const { result } = renderHook(() =>
+      useEditorOfflineEditGate({
+        pageId: "page-2",
+        provider: editorProvider("page.page-1"),
+        isLocalSynced: true,
+        connectionStatus: "disconnected",
+      }),
+    );
+    await settle();
+
+    expect(result.current.canEditOffline).toBe(false);
+  });
+});
+
+describe("useMountCollabRoomOffline", () => {
+  beforeEach(reset);
+  afterEach(() => setOnline(true));
+
+  it("never mounts the room early while the switch is off", async () => {
+    await ownershipSettled();
+    setOnline(false);
+
+    const { result } = renderHook(() => useMountCollabRoomOffline());
+
+    expect(result.current).toBe(false);
+  });
+
+  it("does not mount the room early for a reachable server", async () => {
+    await ownershipSettled();
+    setOfflineEditingEnabled(true);
+
+    const { result } = renderHook(() => useMountCollabRoomOffline());
+
+    expect(result.current).toBe(false);
+  });
+
+  it("waits for ownership of the offline data to be settled", () => {
+    setOfflineEditingEnabled(true);
+    setOnline(false);
+
+    const { result } = renderHook(() => useMountCollabRoomOffline());
+
+    expect(result.current).toBe(false);
+  });
+
+  it("mounts offline and stays mounted once the server is back", async () => {
+    await ownershipSettled();
+    setOfflineEditingEnabled(true);
+    setOnline(false);
+
+    const { result, rerender } = renderHook(() => ({
+      mount: useMountCollabRoomOffline(),
+      online: useOnlineStatus(),
+    }));
+    expect(result.current).toEqual({ mount: true, online: false });
+
+    setOnline(true);
+    rerender();
+
+    expect(result.current).toEqual({ mount: true, online: true });
   });
 });

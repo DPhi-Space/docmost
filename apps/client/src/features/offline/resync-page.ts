@@ -6,7 +6,7 @@
  * is written against a `ResyncSession` interface so the judgement can be tested
  * without a WebSocket.
  *
- * ## What the provider actually tells us (read out of 3.4.4, not assumed)
+ * ## What the provider actually tells us (read out of 4.5.0, not assumed; unchanged from 3.4.4)
  *
  * - `provider.synced` is set to `true` when the **server sends SyncStep2**
  *   (`applySyncMessage`: `if (emitSynced && syncMessageType === messageYjsSyncStep2)`),

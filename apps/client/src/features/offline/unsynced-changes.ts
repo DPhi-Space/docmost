@@ -7,11 +7,11 @@
  * connection `readOnly` for space READERs, page-level restrictions, **the fork's
  * page lock** (via `canUserEditPage`) and trashed pages. Authentication still
  * *succeeds* — the connection is live, the document syncs down, awareness works.
- * Hocuspocus 3.4.4's server then answers every inbound update on such a
- * connection with `SyncStatus(false)` (`hocuspocus-server.esm.js`, the
+ * Hocuspocus's server (4.5.0, as in 3.4.4) then answers every inbound update on
+ * such a connection with `SyncStatus(false)` (`MessageReceiver.ts`, the
  * `messageYjsUpdate` and `messageYjsSyncStep2` branches) and drops it.
  *
- * ## What the 3.4.4 provider does with that answer
+ * ## What the 4.5.0 provider does with that answer (unchanged from 3.4.4)
  *
  * Nothing:
  *
@@ -25,7 +25,7 @@
  * lost server-side and the client is never told.
  *
  * The observable consequence is a counter that never drains.
- * `HocuspocusProvider` 3.4.4 *does* expose the counter three ways: the public
+ * `HocuspocusProvider` *does* expose the counter three ways: the public
  * `unsyncedChanges: number` property, the `hasUnsyncedChanges` getter, and an
  * `unsyncedChanges` event (`provider.on("unsyncedChanges", …)` / the
  * `onUnsyncedChanges` config hook) carrying `{ number }`. The event fires on
@@ -36,6 +36,10 @@
  * it is pinned above zero forever. Hence a sampled counter plus a grace period
  * rather than an event subscription — one mechanism instead of two, since the
  * timer is required either way.
+ *
+ * With `flushDelay` (upstream's editor uses 500 ms) the provider batches
+ * updates and counts one change per flushed batch; the server still answers
+ * each batch once, so the counter drains or pins exactly as above.
  *
  * The reducer below is pure so that the grace-period semantics are pinned by
  * tests rather than by a browser.

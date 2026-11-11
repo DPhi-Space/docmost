@@ -17,11 +17,11 @@
  *    Losing the socket, on the other hand, has plenty of explanations that are
  *    not a dead network (a server restart, an idle timeout, a proxy) — so it only
  *    ever prompts a probe.
- * 2. **A drop has to persist to count.** Every page navigation destroys and
- *    rebuilds the provider, so the status leaves `Connected` constantly during
- *    ordinary use. Reporting immediately would fire a probe per navigation for
- *    nothing; {@link DISCONNECT_GRACE_MS} of *continuous* disconnection is what
- *    distinguishes a rebuild from a problem.
+ * 2. **A drop has to persist to count.** The status leaves `Connected` during
+ *    ordinary use — the editor marks a handshake still pending after 7.5 s as
+ *    `Disconnected` — so reporting immediately would fire probes for nothing;
+ *    {@link DISCONNECT_GRACE_MS} of *continuous* disconnection is what
+ *    distinguishes a blip from a problem.
  *
  * Hosted by `offline-indicator.tsx`, which `layout.tsx` already mounts once per
  * authenticated session — so this reads the collaboration status without adding

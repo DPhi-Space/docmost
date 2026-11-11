@@ -14,8 +14,7 @@
  *
  * The banner that renders all of this lives in `full-editor.tsx`, not in
  * `page-editor.tsx`: keeping the collaboration-adjacent file free of UI is part
- * of what holds its diff to the ~24 lines AGENTS.md commits to re-applying by
- * hand.
+ * of what keeps its diff small enough to re-apply by hand.
  */
 
 import { useSyncExternalStore } from "react";

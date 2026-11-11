@@ -2,9 +2,9 @@
  * "Has this page ever completed a real remote sync in this browser?"
  *
  * This is the single fact the offline editing gate is built on, and the reason
- * phase 2 does not belong to the regression class the fork is pinned away from.
- * Upstream's Hocuspocus v4 rewrite (docmost#2353, see AGENTS.md) lost content by
- * letting an *empty* local Yjs document become authoritative. A marker is
+ * phase 2 does not belong to the regression class of docmost#2353 (see
+ * AGENTS.md), which lost content by letting an *empty* local Yjs document
+ * become authoritative. A marker is
  * written only after the server has answered a sync handshake for that exact
  * document, so its presence means y-indexeddb holds a copy of real server
  * content — never an empty shell.
