@@ -81,6 +81,9 @@ On top of the `v0.97.0` base:
   server is unreachable, then in-app navigation, ran the unmount save on a destroyed title editor
   (`TypeError` reading `'nodes'`) and dropped to the error boundary, switch or no switch. One
   upstream-file line.
+- `feat: native OIDC sign-in (#66)` — one env-configured OIDC provider (`core/oidc`), our own
+  "Sign in with SSO" button and RP-initiated logout; no EE endpoints, no `auth_providers` rows, no
+  migration. See **Native OIDC sign-in** below.
 - other commits not mentioned here
 
 With the single, documented exception of #19's gate patch and its `@hocuspocus/provider` patch,
@@ -1102,6 +1105,138 @@ gateway event, exactly as `CommentService.create` already does for `setCommentMa
 Tests live in `comment-resolve.spec.ts`, a new file: upstream's `comment.service.spec.ts` is a
 never-wired scaffold (`providers: [CommentService]` with no dependencies) that fails on this base
 like a dozen of its siblings, and is deliberately left untouched.
+
+## Native OIDC sign-in (`core/oidc`)
+
+Sign-in through **one** OIDC provider (built for Keycloak brokering Microsoft), configured from the
+environment: `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, optional
+`OIDC_REQUIRED_ROLE` (the ID token's `roles` claim must be an array containing it). **Off unless
+all three of issuer, client id and secret are set**, and always off with `CLOUD=true` (the
+callback is `${APP_URL}/api/oidc/callback`, which a multi-workspace host does not route).
+
+**Not the personal-spaces pattern.** The EE endpoints (`/api/sso/oidc/:providerId/...`), the EE
+settings UI and `auth_providers` rows are deliberately not used: the shipped SSO client is under
+the Enterprise licence. With `auth_providers` empty, upstream's `SsoLogin` renders nothing; the
+"Sign in with SSO" button is our own (`features/oidc/oidc-login-button.tsx`), shown when
+`POST /workspace/public` reports `oidcEnabled`.
+
+- **Routes** (public, `/api` prefix, workspace resolved by `DomainMiddleware`): `GET
+  /api/oidc/login` (code flow + PKCE S256; state, nonce, verifier and a redirect go in an
+  HMAC-signed httpOnly cookie, 10 min, path `/api/oidc`), `GET /api/oidc/callback`, `GET
+  /api/oidc/logout`. Login and callback have their own throttler, `OIDC_THROTTLER` (60/min per IP,
+  not `/auth/login`'s 10, since an office behind one address signs in at once). Every failure lands
+  on `/login?oidc_error=1`; the reason is only in the server log. `redactSensitiveUrl` strips the
+  callback's query from request logs.
+- **The post-login redirect** is checked on the way in and again in the callback by the server's
+  `safeRedirectPath` (`oidc-state.ts`), which also checks its *normalised output*: `new URL`
+  collapses dot-segments, so `/.//evil.com` comes out as `//evil.com`. The client's upstream
+  `safeRedirectPath` in `lib/app-route.ts` has the same flaw and is not changed here.
+- **`oidc-client.ts` is the only importer of `openid-client`** (6.8.2, already a dependency,
+  ESM-only — loaded through Node's `require(esm)`, fine on the image's Node 26). The library checks
+  state, PKCE, issuer, audience, expiry, nonce and — via `enableNonRepudiationChecks` — the ID
+  token signature against the JWKS. Specs load it with `jest.mock('openid-client', () =>
+  process.getBuiltinModule('node:module').createRequire(__filename)('openid-client'))`; the global
+  Jest config is untouched.
+- **The session is the password login's**: `SessionService.createSessionAndToken` plus
+  `setAuthCookie`, extracted from `AuthController` into `auth.util.ts` — a plain `ACCESS` token and
+  a `user_sessions` row. `validateSsoEnforcement` is never called on this path, and there is no MFA
+  step (the EE MFA module is absent; MFA is the IdP's job). The audit calls (`USER_LOGIN` /
+  `USER_CREATED` with `source: 'oidc'`) go to the fork's no-op audit service, so nothing is
+  recorded anywhere visible; the server log has the link and creation lines.
+
+**Linking** (`oidc-account.service.ts`, one transaction that first takes
+`pg_advisory_xact_lock(hashtext(workspaceId:sub))`; the rules are `resolveOidcUser`, tested against
+an in-memory store):
+1. an `auth_accounts` row with `provider_user_id = sub`, `auth_provider_id IS NULL` ⇒ that user —
+   deactivated and deleted users included, so they are refused below;
+2. else, only if `email_verified === true` and the email has exactly one `@`: exactly one user with
+   that email ignoring case (deactivated and deleted rows count, rows locked `FOR UPDATE`) ⇒ insert
+   the link (logged with user id and sub), unless that user is already linked to a different `sub`
+   (NULL `auth_provider_id` means the unique constraint cannot catch this, so the code does);
+3. else create a user: `workspace.emailDomains` applies, default group, email verified, a pending
+   invitation for that email is honoured (role, groups, then deleted), otherwise `member`.
+   `insertUser` always hashes a password, so the user gets a random, never-disclosed one and
+   `has_generated_password = true`. No inviter email, no billing queue (self-hosted only);
+4. a disabled or deleted user, a sub linked to several users, or two email matches ⇒ refused.
+   Nothing is ever reactivated or replaced.
+
+**Deleting a member keeps their link as a tombstone.** `WorkspaceService.deleteUser` rewrites the
+email to `<uuid>@deleted.docmost.com` and used to delete every `auth_accounts` row, so the next SSO
+sign-in matched nothing and created a fresh member. It now deletes only rows with a non-NULL
+`auth_provider_id`; the native link survives, step 1 finds the deleted user, and sign-in is refused.
+The tombstone exists only if the member had signed in via SSO at least once: a member deleted
+before that has no link and an anonymised email, so their first SSO sign-in still creates a fresh
+account — remove their provider role as well. The tombstone keeps the IdP `sub` beside the
+otherwise anonymised user row.
+
+**Logout** ends the provider session too (otherwise a shared PC signs straight back in). The
+callback keeps the raw ID token in an httpOnly cookie (path `/api/oidc`, auth-cookie expiry). After
+a *successful* `POST /auth/logout`, `handleLogout` always navigates to `/api/oidc/logout`, which
+redirects to the provider's `end_session_endpoint` with `id_token_hint` and
+`post_logout_redirect_uri=${APP_URL}/login` — or to `/login?logout=1` when OIDC is off or there is
+no ID-token cookie (a password session, e.g. the break-glass admin). So every online logout takes
+one extra 302, OIDC or not. An offline logout goes straight to `/login?logout=1`. A request with a
+`Sec-Fetch-Site` other than `same-origin` gets `/login?logout=1` and keeps its cookie, so another
+site cannot log the user out of the provider by linking here. Browsers send that header only to
+secure origins (https or localhost), so on a plain-`http:` deployment this protection does nothing.
+
+**Operating it.**
+- **Switch on `enforce_sso` at go-live**: `update workspaces set enforce_sso = true;`. Without it a
+  member can change their own email (password confirmation only, no verification) to a colleague's
+  address before that colleague's first SSO sign-in, and so receive the link. `enforce_sso` makes
+  core refuse password login, forgot-password, invitation password sign-up and *email changes*; it
+  does **not** block `POST /auth/change-password`, and a reset token issued before it was switched
+  on stays valid for its 30 minutes. The login page hides the password form. The EE toggle is not
+  an option (EE UI, and it requires an `auth_providers` row).
+- **Break-glass:** set `enforce_sso = false` in the database. That re-enables password login for
+  *every* member who has a password, not only the admin.
+- **Provider preconditions**, all on the Keycloak side and all trusted blindly here: the Microsoft
+  identity provider is single-tenant; its "Trust Email" means Entra's email claim is taken as
+  verified; users cannot edit their email in Keycloak; the *User Client Role* mapper names the
+  Docmost client (blank means roles from every client), claim `roles`, multivalued, added to the ID
+  token. With `OIDC_REQUIRED_ROLE` unset and `emailDomains` empty, anyone who can authenticate at
+  the realm gets a member account. Email linking gives owners and admins no special protection.
+  Client: confidential, standard flow only, PKCE S256, redirect URI `<APP_URL>/api/oidc/callback`,
+  post-logout redirect URI `<APP_URL>/login`.
+- **Before switching on, check the member list**: a member whose Docmost email differs from the
+  provider's gets a second, empty account at their first SSO sign-in.
+- **Offboarding: deactivate in Docmost.** That cuts sessions, API keys and so MCP immediately (OAuth
+  access tokens are rejected on the fork anyway; pinned by `jwt.strategy.spec.ts`). Removing the
+  role or the user at the provider alone leaves existing sessions alive until
+  `JWT_TOKEN_EXPIRES_IN` (set it to about `12h`) and API keys indefinitely. Deleting the member
+  also refuses future SSO sign-ins, once they have signed in via SSO (the tombstone link above);
+  otherwise remove their provider role too.
+- **Re-admitting a deleted person** (a returning employee): their `sub` is refused permanently by
+  the tombstone, and the user row's email is anonymised, so look the link up by `sub`:
+  `delete from auth_accounts where auth_provider_id is null and provider_user_id = '<sub>';`
+- **A re-created Keycloak user** has a new `sub` and is refused as "already linked to a different
+  sub" until the old link is removed:
+  `delete from auth_accounts where auth_provider_id is null and user_id = (select id from users where lower(email) = lower('<email>'));`
+
+Known limitations, not fixed: the cookies do not use the `__Host-` prefix; the provider logout is a
+GET redirect, not a POST; a plain-`http:` issuer is accepted with a warning; two tabs starting a
+sign-in at once share one state cookie, so the first one's callback fails (a retry works); the
+`/api` refusal in `safeRedirectPath` is a prefix check, so an encoded `/%61pi/...` gets through
+(harmless: same origin, GET only); a browser drops a cookie over ~4 KB, so a very large ID token
+silently skips the provider logout; a 429 on these GET routes renders as raw JSON.
+
+Upstream files touched: `auth.controller.ts` (`setAuthCookie` delegates, +2 −8), `auth.util.ts`
+(+16), `core.module.ts` (+2), `workspace.service.ts` (`oidcEnabled` and `deleteUser` keeps
+NULL-provider links, +3 −1), `throttler-names.ts` (+2), `throttle.module.ts` (+2),
+`common/helpers/utils.ts` (`/api/oidc/` redaction, +5 −1), `login-form.tsx` and
+`invite-sign-up-form.tsx` (+2 each), `use-auth.ts` (+8 −2), `workspace.types.ts` (+1), en-US
+`translation.json` (+3 −1), `.env.example`. Fork files touched: `logout-exit.ts` (navigation is
+told whether the server logout succeeded) and its test, `sw/routes.test.ts` (pins `/api/oidc/*`
+navigations as passthrough). No migration, no dependency or lockfile change, nothing on the
+collaboration path.
+
+Verified end to end against Keycloak 26.4 (`start-dev`) and the built image: link of an existing
+owner by email (logged), re-login by `sub` without a duplicate link, deep-link redirect kept and a
+dot-segment redirect neutralised, missing role and unverified email refused, invitation honoured,
+new member in the default group, `enforce_sso` blocking password login while OIDC still signs in,
+logout ending the Keycloak session (a cross-site `Sec-Fetch-Site` is ignored), a deleted member
+refused through the tombstone link with no account re-created, a deactivated user's session and
+sign-in both refused, 20 logins a minute from one IP without a 429.
 
 ## Adopting a newer upstream release
 

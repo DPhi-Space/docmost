@@ -183,8 +183,14 @@ export default function useAuth() {
     await performLogoutExit({
       serverLogout: logout,
       clearOfflineData: () => clearOfflineData({ queryClient }),
-      navigateToLogin: () =>
-        window.location.replace(`${APP_ROUTE.AUTH.LOGIN}?logout=1`),
+      // /api/oidc/logout ends the provider session, or answers /login?logout=1
+      // itself when OIDC is off; offline only the cached login page is reachable.
+      navigateToLogin: (serverLoggedOut) =>
+        window.location.replace(
+          serverLoggedOut
+            ? "/api/oidc/logout"
+            : `${APP_ROUTE.AUTH.LOGIN}?logout=1`,
+        ),
       log: (message, detail) => console.warn(`[docmost] ${message}`, detail),
     });
   };

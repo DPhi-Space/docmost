@@ -13,6 +13,7 @@ import {
   SIEM_TEST_THROTTLER,
   UNFURL_THROTTLER,
   CLOUD_EMAIL_THROTTLER,
+  OIDC_THROTTLER,
 } from './throttler-names';
 import Redis from 'ioredis';
 
@@ -33,6 +34,7 @@ import Redis from 'ioredis';
             { name: SIEM_TEST_THROTTLER, ttl: 60_000, limit: 10 },
             { name: UNFURL_THROTTLER, ttl: 60_000, limit: 120 },
             { name: CLOUD_EMAIL_THROTTLER, ttl: 60_000, limit: 5 },
+            { name: OIDC_THROTTLER, ttl: 60_000, limit: 60 },
           ],
           errorMessage: 'Too many requests',
           storage: new ThrottlerStorageRedisService(

@@ -30,6 +30,7 @@ import { FavoriteModule } from './favorite/favorite.module';
 import { SessionModule } from './session/session.module';
 import { TemplateModule } from './template/template.module';
 import { ClsMiddleware } from 'nestjs-cls';
+import { OidcModule } from './oidc/oidc.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { ClsMiddleware } from 'nestjs-cls';
     LinearModule,
     SessionModule,
     TemplateModule,
+    OidcModule,
   ],
 })
 export class CoreModule implements NestModule {

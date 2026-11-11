@@ -53,6 +53,7 @@ import {
 import { IntegrationConnectionRepo } from '../../integration/repos/integration-connection.repo';
 import { WsService } from '../../../ws/ws.service';
 import { CollabAccessService } from '../../../collaboration/services/collab-access.service';
+import { isOidcEnabled } from '../../oidc/oidc.settings';
 
 @Injectable()
 export class WorkspaceService {
@@ -122,7 +123,7 @@ export class WorkspaceService {
 
     const { licenseKey, plan, ...rest } = workspace;
 
-    return rest;
+    return { ...rest, oidcEnabled: isOidcEnabled() };
   }
 
   async create(
@@ -1054,6 +1055,7 @@ export class WorkspaceService {
       await trx
         .deleteFrom('authAccounts')
         .where('userId', '=', userId)
+        .where('authProviderId', 'is not', null)
         .execute();
 
       await this.watcherRepo.deleteByUserAndWorkspace(userId, workspaceId, {
