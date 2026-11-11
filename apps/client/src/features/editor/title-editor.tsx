@@ -141,7 +141,8 @@ export function TitleEditor({
   }, [title]);
 
   const saveTitle = useCallback(() => {
-    if (!titleEditor || activePageId !== pageId) return;
+    if (!titleEditor || titleEditor.isDestroyed || activePageId !== pageId)
+      return;
 
     if (
       titleEditor.getText() === title ||
